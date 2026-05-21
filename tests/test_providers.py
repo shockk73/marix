@@ -7,6 +7,7 @@ from providers.timetable_base import TimetableBaseProvider
 from providers.mogilevminsk import MogilevMinskProvider
 from providers.avto_slava import AvtoSlavaProvider
 from providers.buspro import BusProProvider
+from providers.atlasbus import AtlasBusProvider
 
 
 def test_trip_fields():
@@ -186,3 +187,69 @@ def test_buspro_config():
     assert p.display_name == "Гранд Экспресс"
     assert p.directions["mg_mnsk"] == ("30", "37")
     assert p.directions["mnsk_mg"] == ("37", "30")
+
+
+ATLASBUS_RESPONSE = {
+    "calendar": [],
+    "rides": [
+        {
+            "id": "ims4:abc:1:625665:625144",
+            "name": "Могилев- Минск",
+            "carrier": "ООО Фиарт",
+            "departure": "2026-05-24T04:00:00",
+            "arrival": "2026-05-24T07:00:00",
+            "freeSeats": 9,
+            "price": 30,
+            "currency": "BYN",
+            "status": "sale",
+        },
+        {
+            "id": "ims4:def:1:625665:625144",
+            "name": "Могилев- Минск",
+            "carrier": "ООО СапсанВит",
+            "departure": "2026-05-24T06:00:00",
+            "arrival": "2026-05-24T09:00:00",
+            "freeSeats": 0,
+            "price": 25,
+            "currency": "BYN",
+            "status": "sale",
+        },
+        {
+            "id": "ims4:ghi:1:625665:625144",
+            "name": "Могилев- Минск",
+            "carrier": "ООО Фиарт",
+            "departure": "2026-05-25T04:00:00",
+            "arrival": "2026-05-25T07:00:00",
+            "freeSeats": 5,
+            "price": 30,
+            "currency": "BYN",
+            "status": "sale",
+        },
+    ],
+}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_atlasbus_parses_trips():
+    respx.get(url__startswith="https://atlasbus.by/api/search").mock(
+        return_value=httpx.Response(200, json=ATLASBUS_RESPONSE)
+    )
+    provider = AtlasBusProvider()
+    async with httpx.AsyncClient() as client:
+        trips = await provider.get_trips(client, "2026-05-24", DIRECTION_MG_MNSK)
+
+    assert len(trips) == 2
+    assert trips[0].trip_id == "ims4:abc:1:625665:625144"
+    assert trips[0].departure_time == "04:00"
+    assert trips[0].free_seats == 9
+    assert trips[0].price == 30.0
+    assert trips[0].currency == "BYN"
+    assert trips[1].free_seats == 0
+
+
+def test_atlasbus_config():
+    p = AtlasBusProvider()
+    assert p.display_name == "Атласбус"
+    assert p.directions["mg_mnsk"] == ("c625665", "c625144")
+    assert p.directions["mnsk_mg"] == ("c625144", "c625665")
