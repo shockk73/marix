@@ -4,6 +4,8 @@ import respx
 
 from providers.base import Trip, DIRECTION_MG_MNSK, DIRECTION_MNSK_MG, DIRECTION_LABELS
 from providers.timetable_base import TimetableBaseProvider
+from providers.mogilevminsk import MogilevMinskProvider
+from providers.avto_slava import AvtoSlavaProvider
 
 
 def test_trip_fields():
@@ -117,3 +119,18 @@ async def test_timetable_posts_correct_form():
     assert "from_city" in body
     assert "dest_city" in body
     assert "2026-05-24" in body
+
+
+def test_mogilevminsk_config():
+    p = MogilevMinskProvider()
+    assert p.display_name == "Минск Экспресс"
+    assert p.directions["mg_mnsk"] == ("2", "1")
+    assert p.directions["mnsk_mg"] == ("1", "2")
+    assert "mogilevminsk.by" in p.url
+
+
+def test_avto_slava_config():
+    p = AvtoSlavaProvider()
+    assert p.display_name == "Автослава"
+    assert p.directions["mg_mnsk"] == ("2", "1")
+    assert "avto-slava.by" in p.url
