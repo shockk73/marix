@@ -162,3 +162,103 @@ async def test_run_turn_per_user_lock_is_per_user(tmp_db, fake_bot, fake_schedul
     await agent.run_turn(user_id=1, text="a", user_name=None)
     await agent.run_turn(user_id=2, text="b", user_name=None)
     assert len(fake_bot.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_turn_ask_user_creates_pending(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": None,
+        "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "ask_user", "arguments": json.dumps({
+                "question": "Какое отслеживание удалить?",
+                "options": ["#5 Mogilev", "#7 Minsk"],
+            })},
+        }],
+    })
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="удали", user_name=None)
+
+    assert len(fake_bot.sent) == 1
+    assert "Какое отслеживание" in fake_bot.sent[0]["text"]
+    kb = fake_bot.sent[0]["reply_markup"]
+    assert kb is not None
+    p = await db_module.get_pending_tool_call(1)
+    assert p is not None
+    assert p["tool_call_id"] == "c1"
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assert all(m["role"] != "tool" for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_continue_turn_after_callback(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": "Отлично, удалил #5",
+    })
+    agent = _mk_agent(fake_bot, client)
+    await db_module.insert_chat_message(
+        1, "user", content="удали",
+    )
+    await db_module.insert_chat_message(
+        1, "assistant", content=None,
+        tool_calls=json.dumps([{"id": "c1", "type": "function",
+                                "function": {"name": "ask_user",
+                                             "arguments": "{}"}}]),
+    )
+    await db_module.set_pending_tool_call(
+        1, "c1", "ask_user", json.dumps(["#5", "#7"]), 999,
+    )
+
+    await agent.continue_turn(user_id=1, selected_option="#5")
+
+    assert await db_module.get_pending_tool_call(1) is None
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    tool_msgs = [m for m in msgs if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "c1"
+    assert tool_msgs[0]["content"] == "#5"
+    assert fake_bot.sent[-1]["text"] == "Отлично, удалил #5"
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_writes_canceled_marker(tmp_db, fake_bot, fake_scheduler):
+    agent = _mk_agent(fake_bot, AsyncMock())
+    await db_module.set_pending_tool_call(
+        1, "c42", "ask_user", json.dumps(["a", "b"]), 555,
+    )
+
+    await agent.cancel_pending(user_id=1)
+
+    assert await db_module.get_pending_tool_call(1) is None
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    tool_msgs = [m for m in msgs if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "c42"
+    payload = json.loads(tool_msgs[0]["content"])
+    assert payload["canceled"] is True
+    assert len(fake_bot.edited) == 1
+    assert fake_bot.edited[0]["message_id"] == 555
+
+
+@pytest.mark.asyncio
+async def test_run_turn_auto_cancels_pending(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": "ок"
+    })
+    agent = _mk_agent(fake_bot, client)
+    await db_module.set_pending_tool_call(
+        1, "c1", "ask_user", json.dumps(["x"]), 100,
+    )
+
+    await agent.run_turn(user_id=1, text="забей, что у меня?", user_name=None)
+
+    assert await db_module.get_pending_tool_call(1) is None
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    canceled = [m for m in msgs if m["role"] == "tool"
+                and m["tool_call_id"] == "c1"]
+    assert len(canceled) == 1
+    assert json.loads(canceled[0]["content"])["canceled"] is True

@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
 import httpx
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import OPENROUTER_MAX_TURNS, LLM_HISTORY_SIZE
 import db as db_module
@@ -42,8 +43,46 @@ class LLMAgent:
     async def run_turn(self, user_id: int, text: str, user_name: str | None) -> None:
         async with self._lock_for(user_id):
             await db_module.set_user_name(user_id, user_name)
+            await self._auto_cancel_pending(user_id)
             await db_module.insert_chat_message(user_id, "user", content=text)
             await self._drive_turn(user_id)
+
+    async def continue_turn(self, user_id: int, selected_option: str) -> None:
+        async with self._lock_for(user_id):
+            pending = await db_module.get_pending_tool_call(user_id)
+            if pending is None:
+                return
+            await db_module.insert_chat_message(
+                user_id, "tool", content=selected_option,
+                tool_call_id=pending["tool_call_id"],
+            )
+            await db_module.delete_pending_tool_call(user_id)
+            await self._drive_turn(user_id)
+
+    async def cancel_pending(self, user_id: int) -> None:
+        async with self._lock_for(user_id):
+            await self._auto_cancel_pending(user_id)
+
+    async def _auto_cancel_pending(self, user_id: int) -> None:
+        pending = await db_module.get_pending_tool_call(user_id)
+        if pending is None:
+            return
+        try:
+            await self._bot.edit_message_reply_markup(
+                chat_id=user_id,
+                message_id=pending["message_id"],
+                reply_markup=None,
+            )
+        except Exception as e:
+            logger.debug("Could not strip keyboard from msg %s: %s",
+                         pending["message_id"], e)
+        await db_module.insert_chat_message(
+            user_id, "tool",
+            content=json.dumps({"canceled": True,
+                                "reason": "user sent new message"}),
+            tool_call_id=pending["tool_call_id"],
+        )
+        await db_module.delete_pending_tool_call(user_id)
 
     async def _drive_turn(self, user_id: int) -> None:
         for _turn in range(OPENROUTER_MAX_TURNS):
@@ -87,6 +126,7 @@ class LLMAgent:
             )
 
             ctx = ToolContext(user_id=user_id)
+            ask_user_pending = False
             for tc in tool_calls:
                 tc_id = tc["id"]
                 fn = tc["function"]
@@ -96,15 +136,43 @@ class LLMAgent:
                 except json.JSONDecodeError:
                     args = {}
                 if name == "ask_user":
-                    # Placeholder — реальная обработка добавится в следующем таске.
-                    result = json.dumps({"error": "ask_user not yet wired"})
+                    await self._handle_ask_user(user_id, tc_id, args)
+                    ask_user_pending = True
+                    break
                 else:
                     result = await dispatch_tool(name, args, ctx)
-                await db_module.insert_chat_message(
-                    user_id, "tool", content=result, tool_call_id=tc_id,
-                )
+                    await db_module.insert_chat_message(
+                        user_id, "tool", content=result, tool_call_id=tc_id,
+                    )
+
+            if ask_user_pending:
+                return
 
         msg_text = "Запутался — попробуй переформулировать."
         await db_module.insert_chat_message(user_id, "assistant", content=msg_text)
         await self._bot.send_message(user_id, msg_text)
         await db_module.prune_chat_messages(user_id, LLM_HISTORY_SIZE * 2)
+
+    async def _handle_ask_user(self, user_id: int, tool_call_id: str, args: dict) -> None:
+        question = str(args.get("question", "Уточни, пожалуйста"))
+        options = args.get("options") or []
+        if not isinstance(options, list) or len(options) < 2:
+            await db_module.insert_chat_message(
+                user_id, "tool",
+                content=json.dumps({"error": "ask_user needs 2..8 options"}),
+                tool_call_id=tool_call_id,
+            )
+            return
+        options = [str(o) for o in options][:8]
+
+        rows = [[InlineKeyboardButton(text=opt[:64], callback_data=f"ai:{i}")]
+                for i, opt in enumerate(options)]
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        sent = await self._bot.send_message(user_id, question, reply_markup=kb)
+
+        await db_module.set_pending_tool_call(
+            user_id=user_id, tool_call_id=tool_call_id,
+            tool_name="ask_user",
+            options_json=json.dumps(options, ensure_ascii=False),
+            message_id=sent.message_id,
+        )
