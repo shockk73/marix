@@ -8,7 +8,10 @@ from typing import Any, Callable
 import httpx
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import OPENROUTER_MAX_TURNS, LLM_HISTORY_SIZE, LLM_VISION
+from config import (
+    OPENROUTER_MAX_TURNS, LLM_HISTORY_SIZE, LLM_VISION,
+    LLM_AUDIO, LLM_STT_MODEL,
+)
 import db as db_module
 from llm.client import OpenRouterClient
 from llm.history import to_openai_messages
@@ -123,6 +126,79 @@ class LLMAgent:
         parts.append({
             "type": "image_url",
             "image_url": {"url": f"data:{mime};base64,{b64}"},
+        })
+        return {"role": "user", "content": parts}
+
+    async def handle_audio(
+        self,
+        user_id: int,
+        audio_bytes: bytes,
+        audio_format: str,
+        caption: str | None,
+        user_name: str | None,
+    ) -> None:
+        if LLM_AUDIO:
+            async with self._lock_for(user_id):
+                await db_module.set_user_name(user_id, user_name)
+                await self._auto_cancel_pending(user_id)
+                caption_text = caption or ""
+                placeholder = f"[audio] {caption_text}".strip()
+                await db_module.insert_chat_message(user_id, "user", content=placeholder)
+                await self._drive_turn(
+                    user_id,
+                    _override_last_user=self._build_audio_user(
+                        audio_bytes, audio_format, caption_text,
+                    ),
+                )
+            return
+
+        if LLM_STT_MODEL:
+            try:
+                text = await self._client.transcribe(
+                    stt_model=LLM_STT_MODEL,
+                    audio_bytes=audio_bytes,
+                    audio_format=audio_format,
+                )
+            except Exception as e:
+                logger.warning("STT failed: %s", e)
+                await self._bot.send_message(
+                    user_id,
+                    "Не удалось распознать голосовое. Попробуй ещё раз или напиши текстом.",
+                )
+                return
+            if not text:
+                await self._bot.send_message(
+                    user_id,
+                    "Не разобрал голосовое. Скажи ещё раз или напиши текстом.",
+                )
+                return
+            async with self._lock_for(user_id):
+                await db_module.set_user_name(user_id, user_name)
+                await self._auto_cancel_pending(user_id)
+                placeholder = f"[voice] {text}"
+                await db_module.insert_chat_message(user_id, "user", content=placeholder)
+                await self._drive_turn(user_id)
+            return
+
+        await self._bot.send_message(
+            user_id,
+            "Я не умею слушать голосовые. Напиши текстом или настрой "
+            "LLM_AUDIO/LLM_STT_MODEL в .env.",
+        )
+
+    def _build_audio_user(
+        self,
+        audio_bytes: bytes,
+        audio_format: str,
+        caption: str,
+    ) -> dict[str, Any]:
+        b64 = base64.b64encode(audio_bytes).decode("ascii")
+        parts: list[dict[str, Any]] = []
+        if caption:
+            parts.append({"type": "text", "text": caption})
+        parts.append({
+            "type": "input_audio",
+            "input_audio": {"data": b64, "format": audio_format},
         })
         return {"role": "user", "content": parts}
 

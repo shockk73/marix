@@ -309,3 +309,95 @@ async def test_handle_photo_vision_enabled_sends_to_llm(tmp_db, fake_bot, fake_s
     assert "[photo]" in user_rows[0]["content"]
     assert "опиши" in user_rows[0]["content"]
     assert "data:image" not in user_rows[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_handle_audio_disabled_no_stt(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    monkeypatch.setattr("llm.agent.LLM_AUDIO", False)
+    monkeypatch.setattr("llm.agent.LLM_STT_MODEL", "")
+    client = AsyncMock()
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_audio(
+        user_id=1, audio_bytes=b"\x00", audio_format="ogg",
+        caption=None, user_name=None,
+    )
+
+    assert len(fake_bot.sent) == 1
+    assert "голос" in fake_bot.sent[0]["text"].lower() or "audio" in fake_bot.sent[0]["text"].lower()
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assert len(msgs) == 0
+    client.chat_completion.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_audio_via_stt_then_run_turn(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    monkeypatch.setattr("llm.agent.LLM_AUDIO", False)
+    monkeypatch.setattr("llm.agent.LLM_STT_MODEL", "mistralai/voxtral-mini-transcribe")
+    client = AsyncMock()
+    client.transcribe = AsyncMock(return_value="что у меня?")
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": "пусто",
+    })
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_audio(
+        user_id=1, audio_bytes=b"\xff", audio_format="ogg",
+        caption=None, user_name="Маша",
+    )
+
+    client.transcribe.assert_called_once()
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    user_rows = [m for m in msgs if m["role"] == "user"]
+    assert len(user_rows) == 1
+    assert "[voice]" in user_rows[0]["content"]
+    assert "что у меня?" in user_rows[0]["content"]
+    assert fake_bot.sent[-1]["text"] == "пусто"
+
+
+@pytest.mark.asyncio
+async def test_handle_audio_native_multimodal(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    monkeypatch.setattr("llm.agent.LLM_AUDIO", True)
+    captured = {}
+
+    async def fake_completion(messages, tools):
+        captured["messages"] = messages
+        return {"role": "assistant", "content": "услышал"}
+
+    client = AsyncMock()
+    client.chat_completion = fake_completion
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_audio(
+        user_id=1, audio_bytes=b"\xff\xd8", audio_format="ogg",
+        caption=None, user_name=None,
+    )
+
+    user_msg = next(m for m in reversed(captured["messages"]) if m["role"] == "user")
+    assert isinstance(user_msg["content"], list)
+    assert any(p.get("type") == "input_audio" for p in user_msg["content"])
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    user_rows = [m for m in msgs if m["role"] == "user"]
+    assert "[audio]" in user_rows[0]["content"]
+    assert "data:" not in user_rows[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_handle_audio_stt_failure(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    import httpx
+    monkeypatch.setattr("llm.agent.LLM_AUDIO", False)
+    monkeypatch.setattr("llm.agent.LLM_STT_MODEL", "stt/model")
+    client = AsyncMock()
+    client.transcribe = AsyncMock(
+        side_effect=httpx.RequestError("boom"),
+    )
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_audio(
+        user_id=1, audio_bytes=b"\x00", audio_format="ogg",
+        caption=None, user_name=None,
+    )
+
+    assert "не удалось" in fake_bot.sent[-1]["text"].lower() or "ошибк" in fake_bot.sent[-1]["text"].lower()
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assert len(msgs) == 0
