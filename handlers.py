@@ -19,8 +19,20 @@ from db import (
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS, DIRECTION_MG_MNSK, DIRECTION_MNSK_MG
 from scheduler import start_watch, cancel_watch
+from llm.agent import LLMAgent
 
 router = Router()
+
+_agent: LLMAgent | None = None
+
+
+def set_agent(agent: LLMAgent) -> None:
+    global _agent
+    _agent = agent
+
+
+def _user_display_name(u) -> str | None:
+    return (u.first_name or u.username or None) if u else None
 
 
 class AuthMiddleware(BaseMiddleware):
@@ -286,3 +298,110 @@ def _valid_time(t: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+@router.message(F.photo)
+async def on_photo(message: Message, state: FSMContext):
+    if await state.get_state() is not None:
+        return
+    if _agent is None:
+        return
+    photo = message.photo[-1]
+    file = await message.bot.get_file(photo.file_id)
+    buf = await message.bot.download_file(file.file_path)
+    image_bytes = buf.read() if hasattr(buf, "read") else bytes(buf)
+    await _agent.handle_photo(
+        user_id=message.from_user.id,
+        image_bytes=image_bytes,
+        mime="image/jpeg",
+        caption=message.caption,
+        user_name=_user_display_name(message.from_user),
+    )
+
+
+@router.message(F.voice | F.audio)
+async def on_voice_or_audio(message: Message, state: FSMContext):
+    if await state.get_state() is not None:
+        return
+    if _agent is None:
+        return
+    if message.voice:
+        file_id = message.voice.file_id
+        audio_format = "ogg"
+    else:
+        file_id = message.audio.file_id
+        mime = (message.audio.mime_type or "").lower()
+        if "mp3" in mime or "mpeg" in mime:
+            audio_format = "mp3"
+        elif "wav" in mime:
+            audio_format = "wav"
+        elif "ogg" in mime or "opus" in mime:
+            audio_format = "ogg"
+        else:
+            audio_format = "mp3"
+    file = await message.bot.get_file(file_id)
+    buf = await message.bot.download_file(file.file_path)
+    audio_bytes = buf.read() if hasattr(buf, "read") else bytes(buf)
+    await _agent.handle_audio(
+        user_id=message.from_user.id,
+        audio_bytes=audio_bytes,
+        audio_format=audio_format,
+        caption=message.caption,
+        user_name=_user_display_name(message.from_user),
+    )
+
+
+@router.message(F.text)
+async def on_text_fallback(message: Message, state: FSMContext):
+    if await state.get_state() is not None:
+        return
+    if message.text and message.text.startswith("/"):
+        return
+    if _agent is None:
+        await message.answer("AI пока не настроен.")
+        return
+    await _agent.run_turn(
+        user_id=message.from_user.id,
+        text=message.text,
+        user_name=_user_display_name(message.from_user),
+    )
+
+
+@router.callback_query(F.data.startswith("ai:"))
+async def on_ai_callback(cb: CallbackQuery):
+    if _agent is None:
+        await cb.answer()
+        return
+    try:
+        idx = int(cb.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await cb.answer()
+        return
+    user_id = cb.from_user.id
+
+    import json as _json
+    from db import get_pending_tool_call
+    pending = await get_pending_tool_call(user_id)
+    if pending is None:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.answer("Вопрос устарел.", show_alert=False)
+        return
+
+    try:
+        options = _json.loads(pending["options_json"])
+    except Exception:
+        options = []
+    if not (0 <= idx < len(options)):
+        await cb.answer()
+        return
+
+    selected = options[idx]
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.answer()
+    await _agent.continue_turn(user_id=user_id, selected_option=selected)
