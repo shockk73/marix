@@ -23,6 +23,7 @@
 | Pending state | SQLite, новая таблица `pending_tool_calls` — переживает рестарт |
 | Новое сообщение поверх pending | Отменяет висящий `ask_user`, LLM получает tool_result `{canceled: true}` |
 | Поддержка фото | Явный флаг `LLM_VISION=true/false` в .env; без авто-детекта |
+| Поддержка аудио | Явный флаг `LLM_AUDIO=true/false`. Если `true` — отправляем напрямую в основную LLM как multimodal. Если `false` — используем STT-модель `LLM_STT_MODEL` (отдельный chat-completion вызов в OpenRouter); если она тоже пуста — отказ |
 | Concurrency | `asyncio.Lock` per user_id |
 | Лимит витков LLM | `OPENROUTER_MAX_TURNS` (дефолт 5) — защита от циклов tool_call ↔ tool_result |
 
@@ -54,6 +55,8 @@ Tool handlers получают `ctx` с `user_id` и `bot` — никогда н
 | `OPENROUTER_MAX_TURNS` | нет | `5` | Макс. итераций tool-call цикла за один `run_turn` |
 | `LLM_HISTORY_SIZE` | нет | `50` | Сколько последних `chat_messages` подгружать в контекст |
 | `LLM_VISION` | нет | `false` | `true` если выбранная модель умеет vision |
+| `LLM_AUDIO` | нет | `false` | `true` если основная модель умеет аудио (multimodal input audio) |
+| `LLM_STT_MODEL` | нет | пусто | ID OpenRouter-модели для speech-to-text, напр. `mistralai/voxtral-mini-transcribe` или `google/chirp-3`. Используется когда `LLM_AUDIO=false` |
 
 При старте `config.py` проверяет наличие обязательных. Отсутствие → бот падает (как сейчас с `BOT_TOKEN`).
 
@@ -181,6 +184,18 @@ Pending остаётся в БД. Клавиатура у старого Telegra
   - Кодирует в base64 data URL: `data:image/jpeg;base64,...`.
   - Шлёт в LLM в формате OpenAI multimodal: `content: [{type: "text", text: caption_или_""}, {type: "image_url", image_url: {url: ...}}]`.
   - В `chat_messages.content` пишет плейсхолдер `[photo] {caption}` — без base64, чтобы БД не пухла. LLM в следующих витках разговора видит, что фото было, но не сами пиксели. Это приемлемо: для текущего витка пиксели передаются, дальше работает с текстом.
+
+### Случай G — голосовое сообщение / аудио
+
+Telegram присылает `voice` (OGG/Opus) или `audio` (MP3 и пр.). Самый частый случай — voice. Используем `message.voice` или `message.audio`, скачиваем bytes.
+
+- `LLM_AUDIO=true`: основная модель умеет audio input напрямую.
+  - Кодируем в base64, шлём как OpenAI multimodal: `content: [{type: "text", text: caption}, {type: "input_audio", input_audio: {data: base64, format: "ogg"|"mp3"}}]`.
+  - В историю пишем плейсхолдер `[audio] {caption}`.
+- `LLM_AUDIO=false` и `LLM_STT_MODEL` задан: транскрибируем отдельным вызовом OpenRouter — `chat/completions` с моделью `LLM_STT_MODEL` и аудио в content (тот же multimodal формат). Промпт STT-вызова — простая инструкция: «Транскрибируй это аудио в текст. Верни только текст без комментариев.» Полученный текст уходит в `run_turn` как обычное текстовое сообщение, в историю пишется `[voice] <транскрипция>`.
+- `LLM_AUDIO=false` и `LLM_STT_MODEL` пуст: бот отвечает «Я не умею слушать голосовые. Напиши текстом или настрой LLM_STT_MODEL в .env.»
+
+Конвертация форматов (OGG→WAV) не делается — отправляем как есть. Если STT-модель не поддерживает формат — её ошибка просочится как обычная HTTP-ошибка, юзер увидит сообщение об ошибке STT.
 
 ## Безопасность
 
