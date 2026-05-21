@@ -253,3 +253,17 @@ def test_atlasbus_config():
     assert p.display_name == "Атласбус"
     assert p.directions["mg_mnsk"] == ("c625665", "c625144")
     assert p.directions["mnsk_mg"] == ("c625144", "c625665")
+
+
+from providers import PROVIDERS
+
+
+def test_registry_has_all_providers():
+    assert set(PROVIDERS.keys()) == {"mogilevminsk", "avto_slava", "buspro", "atlasbus"}
+    for key, p in PROVIDERS.items():
+        assert hasattr(p, "name")
+        assert hasattr(p, "display_name")
+        assert hasattr(p, "directions")
+        assert hasattr(p, "get_trips")
+        assert "mg_mnsk" in p.directions
+        assert "mnsk_mg" in p.directions
