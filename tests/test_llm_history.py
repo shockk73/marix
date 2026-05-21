@@ -77,3 +77,69 @@ async def test_prune_does_not_affect_other_users(tmp_db):
     await db_module.prune_chat_messages(user_id=1, keep=2)
     assert len(await db_module.get_recent_chat_messages(1, 100)) == 2
     assert len(await db_module.get_recent_chat_messages(2, 100)) == 5
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_pending(tmp_db):
+    await db_module.set_pending_tool_call(
+        user_id=1, tool_call_id="call_42", tool_name="ask_user",
+        options_json='["a", "b"]', message_id=999,
+    )
+    p = await db_module.get_pending_tool_call(user_id=1)
+    assert p is not None
+    assert p["tool_call_id"] == "call_42"
+    assert p["tool_name"] == "ask_user"
+    assert p["options_json"] == '["a", "b"]'
+    assert p["message_id"] == 999
+
+
+@pytest.mark.asyncio
+async def test_get_pending_returns_none_when_absent(tmp_db):
+    assert await db_module.get_pending_tool_call(user_id=999) is None
+
+
+@pytest.mark.asyncio
+async def test_set_pending_replaces_existing(tmp_db):
+    await db_module.set_pending_tool_call(1, "call_1", "ask_user", "[]", 100)
+    await db_module.set_pending_tool_call(1, "call_2", "ask_user", '["x"]', 200)
+    p = await db_module.get_pending_tool_call(1)
+    assert p["tool_call_id"] == "call_2"
+    assert p["message_id"] == 200
+
+
+@pytest.mark.asyncio
+async def test_delete_pending(tmp_db):
+    await db_module.set_pending_tool_call(1, "call_1", "ask_user", "[]", 100)
+    await db_module.delete_pending_tool_call(1)
+    assert await db_module.get_pending_tool_call(1) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_pending_idempotent(tmp_db):
+    await db_module.delete_pending_tool_call(999)
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_user_name(tmp_db):
+    await db_module.set_user_name(user_id=1, name="Маша")
+    assert await db_module.get_user_name(1) == "Маша"
+
+
+@pytest.mark.asyncio
+async def test_get_user_name_returns_none_when_absent(tmp_db):
+    assert await db_module.get_user_name(999) is None
+
+
+@pytest.mark.asyncio
+async def test_set_user_name_updates_existing(tmp_db):
+    await db_module.set_user_name(1, "Маша")
+    await db_module.set_user_name(1, "Маша Иванова")
+    assert await db_module.get_user_name(1) == "Маша Иванова"
+
+
+@pytest.mark.asyncio
+async def test_set_user_name_ignores_empty(tmp_db):
+    await db_module.set_user_name(1, "Маша")
+    await db_module.set_user_name(1, "")
+    await db_module.set_user_name(1, None)
+    assert await db_module.get_user_name(1) == "Маша"

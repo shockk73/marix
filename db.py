@@ -51,6 +51,25 @@ CREATE INDEX IF NOT EXISTS idx_chat_user_time
 ON chat_messages(user_id, id)
 """
 
+_CREATE_PENDING_TOOL_CALLS = """
+CREATE TABLE IF NOT EXISTS pending_tool_calls (
+    user_id      INTEGER PRIMARY KEY,
+    tool_call_id TEXT NOT NULL,
+    tool_name    TEXT NOT NULL,
+    options_json TEXT NOT NULL,
+    message_id   INTEGER NOT NULL,
+    created_at   REAL NOT NULL
+)
+"""
+
+_CREATE_USER_PROFILES = """
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    updated_at REAL NOT NULL
+)
+"""
+
 MAX_AUTH_ATTEMPTS = 3
 
 
@@ -61,6 +80,8 @@ async def init_db():
         await conn.execute(_CREATE_AUTH_ATTEMPTS)
         await conn.execute(_CREATE_CHAT_MESSAGES)
         await conn.execute(_CREATE_CHAT_MESSAGES_IDX)
+        await conn.execute(_CREATE_PENDING_TOOL_CALLS)
+        await conn.execute(_CREATE_USER_PROFILES)
         await conn.commit()
 
 
@@ -215,3 +236,72 @@ async def prune_chat_messages(user_id: int, keep: int) -> None:
             (user_id, user_id, keep),
         )
         await conn.commit()
+
+
+async def set_pending_tool_call(
+    user_id: int,
+    tool_call_id: str,
+    tool_name: str,
+    options_json: str,
+    message_id: int,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO pending_tool_calls
+               (user_id, tool_call_id, tool_name, options_json, message_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 tool_call_id = excluded.tool_call_id,
+                 tool_name    = excluded.tool_name,
+                 options_json = excluded.options_json,
+                 message_id   = excluded.message_id,
+                 created_at   = excluded.created_at""",
+            (user_id, tool_call_id, tool_name, options_json, message_id, time.time()),
+        )
+        await conn.commit()
+
+
+async def get_pending_tool_call(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM pending_tool_calls WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def delete_pending_tool_call(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "DELETE FROM pending_tool_calls WHERE user_id = ?",
+            (user_id,),
+        )
+        await conn.commit()
+
+
+async def set_user_name(user_id: int, name: str | None) -> None:
+    """Сохраняет имя; пустые значения игнорирует, чтобы не затирать существующее."""
+    if not name:
+        return
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO user_profiles (user_id, name, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 name       = excluded.name,
+                 updated_at = excluded.updated_at""",
+            (user_id, name, time.time()),
+        )
+        await conn.commit()
+
+
+async def get_user_name(user_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT name FROM user_profiles WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
