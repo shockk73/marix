@@ -171,7 +171,20 @@ def test_to_openai_messages_assistant_with_tool_calls():
          "tool_calls": json.dumps(tc), "tool_call_id": None},
     ]
     result = to_openai_messages(rows)
-    assert result == [{"role": "assistant", "content": None, "tool_calls": tc}]
+    assert result == [{"role": "assistant", "content": "", "tool_calls": tc}]
+
+
+def test_to_openai_messages_tool_result_includes_name_from_prior_call():
+    tc = [{"id": "c1", "type": "function",
+           "function": {"name": "list_watches", "arguments": "{}"}}]
+    rows = [
+        {"role": "assistant", "content": None,
+         "tool_calls": json.dumps(tc), "tool_call_id": None},
+        {"role": "tool", "content": "[]",
+         "tool_calls": None, "tool_call_id": "c1"},
+    ]
+    result = to_openai_messages(rows)
+    assert result[1]["name"] == "list_watches"
 
 
 def test_to_openai_messages_tool_result():

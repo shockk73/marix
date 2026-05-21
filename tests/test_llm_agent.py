@@ -181,9 +181,11 @@ async def test_run_turn_ask_user_creates_pending(tmp_db, fake_bot, fake_schedule
 
     await agent.run_turn(user_id=1, text="удали", user_name=None)
 
-    assert len(fake_bot.sent) == 1
-    assert "Какое отслеживание" in fake_bot.sent[0]["text"]
-    kb = fake_bot.sent[0]["reply_markup"]
+    # 1) "🔧 Уточняю…" preamble, 2) сам вопрос с клавиатурой
+    assert len(fake_bot.sent) == 2
+    question_msg = next(m for m in fake_bot.sent if m["reply_markup"] is not None)
+    assert "Какое отслеживание" in question_msg["text"]
+    kb = question_msg["reply_markup"]
     assert kb is not None
     p = await db_module.get_pending_tool_call(1)
     assert p is not None

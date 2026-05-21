@@ -50,9 +50,12 @@ class OpenRouterClient:
                 return data["choices"][0]["message"]
             except httpx.HTTPStatusError as e:
                 last_exc = e
+                body = e.response.text[:1000] if e.response is not None else ""
                 if e.response.status_code < 500 and e.response.status_code != 429:
+                    logger.warning("OpenRouter %s: %s", e.response.status_code, body)
                     raise
-                logger.warning("OpenRouter %s, retrying", e.response.status_code)
+                logger.warning("OpenRouter %s, retrying. body=%s",
+                               e.response.status_code, body)
             except httpx.RequestError as e:
                 last_exc = e
                 logger.warning("OpenRouter network error: %s, retrying", e)

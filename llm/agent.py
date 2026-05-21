@@ -27,6 +27,16 @@ def _default_now() -> datetime:
     return datetime.now(_MSK)
 
 
+_TOOL_THINKING_LABELS = {
+    "list_watches": "Смотрю активные отслеживания…",
+    "create_watch": "Создаю отслеживание…",
+    "stop_watch": "Останавливаю отслеживание…",
+    "stop_all_watches": "Останавливаю все отслеживания…",
+    "check_trips_now": "Проверяю рейсы сейчас…",
+    "ask_user": "Уточняю…",
+}
+
+
 class LLMAgent:
     def __init__(
         self,
@@ -253,6 +263,12 @@ class LLMAgent:
                 tool_calls=json.dumps(tool_calls),
             )
 
+            if content:
+                try:
+                    await self._bot.send_message(user_id, content)
+                except Exception as e:
+                    logger.debug("preface message send failed: %s", e)
+
             ctx = ToolContext(user_id=user_id)
             ask_user_pending = False
             for tc in tool_calls:
@@ -263,6 +279,12 @@ class LLMAgent:
                     args = json.loads(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                label = _TOOL_THINKING_LABELS.get(name, f"Выполняю {name}…")
+                try:
+                    await self._bot.send_message(user_id, f"🔧 {label}")
+                except Exception as e:
+                    logger.debug("thinking label send failed: %s", e)
+
                 if name == "ask_user":
                     await self._handle_ask_user(user_id, tc_id, args)
                     ask_user_pending = True
