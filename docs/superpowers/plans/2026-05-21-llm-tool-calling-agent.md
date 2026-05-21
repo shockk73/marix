@@ -326,7 +326,7 @@ git commit -m "feat(db): chat_messages table + crud"
 
 ---
 
-## Task 4: DB — таблица `pending_tool_calls`
+## Task 4: DB — таблицы `pending_tool_calls` и `user_profiles`
 
 **Files:**
 - Modify: `db.py`
@@ -375,6 +375,32 @@ async def test_delete_pending(tmp_db):
 @pytest.mark.asyncio
 async def test_delete_pending_idempotent(tmp_db):
     await db_module.delete_pending_tool_call(999)
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_user_name(tmp_db):
+    await db_module.set_user_name(user_id=1, name="Маша")
+    assert await db_module.get_user_name(1) == "Маша"
+
+
+@pytest.mark.asyncio
+async def test_get_user_name_returns_none_when_absent(tmp_db):
+    assert await db_module.get_user_name(999) is None
+
+
+@pytest.mark.asyncio
+async def test_set_user_name_updates_existing(tmp_db):
+    await db_module.set_user_name(1, "Маша")
+    await db_module.set_user_name(1, "Маша Иванова")
+    assert await db_module.get_user_name(1) == "Маша Иванова"
+
+
+@pytest.mark.asyncio
+async def test_set_user_name_ignores_empty(tmp_db):
+    await db_module.set_user_name(1, "Маша")
+    await db_module.set_user_name(1, "")  # пустая строка не должна затирать
+    await db_module.set_user_name(1, None)
+    assert await db_module.get_user_name(1) == "Маша"
 ```
 
 - [ ] **Step 2: Запустить — ждать FAIL**
@@ -400,12 +426,21 @@ CREATE TABLE IF NOT EXISTS pending_tool_calls (
     created_at   REAL NOT NULL
 )
 """
+
+_CREATE_USER_PROFILES = """
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    updated_at REAL NOT NULL
+)
+"""
 ```
 
 В `init_db()` добавь:
 
 ```python
         await conn.execute(_CREATE_PENDING_TOOL_CALLS)
+        await conn.execute(_CREATE_USER_PROFILES)
 ```
 
 В конец `db.py` добавь:
@@ -452,6 +487,32 @@ async def delete_pending_tool_call(user_id: int) -> None:
             (user_id,),
         )
         await conn.commit()
+
+
+async def set_user_name(user_id: int, name: str | None) -> None:
+    """Сохраняет имя; пустые значения игнорирует, чтобы не затирать существующее."""
+    if not name:
+        return
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO user_profiles (user_id, name, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 name       = excluded.name,
+                 updated_at = excluded.updated_at""",
+            (user_id, name, time.time()),
+        )
+        await conn.commit()
+
+
+async def get_user_name(user_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT name FROM user_profiles WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
 ```
 
 - [ ] **Step 4: Запустить — все PASS**
@@ -460,13 +521,13 @@ Run:
 ```bash
 OPENROUTER_API_KEY=test OPENROUTER_MODEL=test/model pytest tests/test_llm_history.py -v
 ```
-Expected: 12 passed (7 предыдущих + 5 новых).
+Expected: 16 passed (7 chat + 5 pending + 4 user_profiles).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add db.py tests/test_llm_history.py
-git commit -m "feat(db): pending_tool_calls table + crud"
+git commit -m "feat(db): pending_tool_calls + user_profiles tables"
 ```
 
 ---
@@ -608,24 +669,45 @@ git commit -m "feat(llm): history rows to openai message format"
 - [ ] **Step 1: Тесты**
 
 ```python
-from datetime import date
+from datetime import datetime, timezone, timedelta
 
 from llm.prompt import build_system_prompt
 
+MSK = timezone(timedelta(hours=3))  # Europe/Minsk без DST
+NOW = datetime(2026, 5, 21, 14, 30, tzinfo=MSK)
+
 
 def test_system_prompt_contains_role():
-    prompt = build_system_prompt(today=date(2026, 5, 21))
+    prompt = build_system_prompt(now=NOW, user_name=None)
     assert "маршрут" in prompt.lower()
     assert "только по теме" in prompt.lower()
 
 
-def test_system_prompt_contains_today_date():
-    prompt = build_system_prompt(today=date(2026, 5, 21))
+def test_system_prompt_contains_today_date_and_time():
+    prompt = build_system_prompt(now=NOW, user_name=None)
     assert "2026-05-21" in prompt
+    assert "14:30" in prompt
+
+
+def test_system_prompt_includes_timezone_label():
+    prompt = build_system_prompt(now=NOW, user_name=None)
+    assert "Minsk" in prompt or "Минск" in prompt
+
+
+def test_system_prompt_with_user_name():
+    prompt = build_system_prompt(now=NOW, user_name="Маша")
+    assert "Маша" in prompt
+    assert "имя" in prompt.lower() or "собеседник" in prompt.lower()
+
+
+def test_system_prompt_without_user_name_does_not_mention_unknown():
+    prompt = build_system_prompt(now=NOW, user_name=None)
+    # без имени — нет блока «Имя собеседника:»
+    assert "Имя собеседника" not in prompt
 
 
 def test_system_prompt_lists_providers():
-    prompt = build_system_prompt(today=date(2026, 5, 21))
+    prompt = build_system_prompt(now=NOW, user_name=None)
     assert "mogilevminsk" in prompt
     assert "avto_slava" in prompt
     assert "buspro" in prompt
@@ -633,7 +715,7 @@ def test_system_prompt_lists_providers():
 
 
 def test_system_prompt_lists_directions():
-    prompt = build_system_prompt(today=date(2026, 5, 21))
+    prompt = build_system_prompt(now=NOW, user_name=None)
     assert "mg_mnsk" in prompt
     assert "mnsk_mg" in prompt
     assert "Могилёв" in prompt
@@ -641,7 +723,7 @@ def test_system_prompt_lists_directions():
 
 
 def test_system_prompt_instructs_to_use_ask_user():
-    prompt = build_system_prompt(today=date(2026, 5, 21))
+    prompt = build_system_prompt(now=NOW, user_name=None)
     assert "ask_user" in prompt
 ```
 
@@ -652,13 +734,13 @@ Expected: `ModuleNotFoundError: No module named 'llm.prompt'`.
 - [ ] **Step 3: Создать `llm/prompt.py`**
 
 ```python
-from datetime import date
+from datetime import datetime
 
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
 
-def build_system_prompt(today: date) -> str:
+def build_system_prompt(now: datetime, user_name: str | None) -> str:
     providers_lines = [
         f"  - {key} ({p.display_name})"
         for key, p in PROVIDERS.items()
@@ -667,32 +749,38 @@ def build_system_prompt(today: date) -> str:
         f"  - {key} ({label})"
         for key, label in DIRECTION_LABELS.items()
     ]
-    return (
+    tz_label = now.tzname() or "Europe/Minsk"
+    parts = [
         "Ты — ассистент Telegram-бота, который отслеживает свободные места "
-        "в маршрутках между Могилёвом и Минском.\n"
-        "\n"
-        f"Сегодня: {today.isoformat()}\n"
-        "\n"
-        "Доступные провайдеры (используй ключи в tool calls):\n"
-        + "\n".join(providers_lines) + "\n"
-        "\n"
-        "Доступные направления:\n"
-        + "\n".join(directions_lines) + "\n"
-        "\n"
-        "Правила:\n"
+        "в маршрутках между Могилёвом и Минском.",
+        "",
+        f"Сегодня: {now.date().isoformat()}, сейчас {now.strftime('%H:%M')} ({tz_label}).",
+    ]
+    if user_name:
+        parts.append(f"Имя собеседника: {user_name}. Обращайся по имени, если уместно.")
+    parts += [
+        "",
+        "Доступные провайдеры (используй ключи в tool calls):",
+        *providers_lines,
+        "",
+        "Доступные направления:",
+        *directions_lines,
+        "",
+        "Правила:",
         "1. Отвечай ТОЛЬКО по теме бота: отслеживания мест, провайдеры, направления, "
-        "расписания, разовые проверки. На оффтопик вежливо отказывайся.\n"
+        "расписания, разовые проверки. На оффтопик вежливо отказывайся.",
         "2. Используй tools для выполнения действий пользователя. Не выдумывай "
-        "результаты — всегда вызывай нужный tool.\n"
+        "результаты — всегда вызывай нужный tool.",
         "3. Если параметров недостаточно (не указана дата, время, провайдер) — "
         "вызови tool ask_user с понятным вопросом и вариантами ответа. "
-        "НЕ угадывай и НЕ выдумывай значения.\n"
-        "4. Парсь относительные даты («завтра», «в субботу», «через неделю») "
-        "относительно сегодняшней даты выше.\n"
+        "НЕ угадывай и НЕ выдумывай значения.",
+        "4. Парсь относительные даты и время («завтра», «в субботу», «через неделю», "
+        "«через 30 минут», «сейчас») относительно текущих даты и времени выше.",
         "5. interval_sec — минимум 60. Если пользователь просит чаще — "
-        "поставь 60 и предупреди.\n"
-        "6. Отвечай на русском, кратко и по делу."
-    )
+        "поставь 60 и предупреди.",
+        "6. Отвечай на русском, кратко и по делу.",
+    ]
+    return "\n".join(parts)
 ```
 
 - [ ] **Step 4: Запустить — все PASS**
@@ -701,13 +789,13 @@ Run:
 ```bash
 OPENROUTER_API_KEY=test OPENROUTER_MODEL=test/model pytest tests/test_llm_prompt.py -v
 ```
-Expected: 5 passed.
+Expected: 8 passed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add llm/prompt.py tests/test_llm_prompt.py
-git commit -m "feat(llm): system prompt builder"
+git commit -m "feat(llm): system prompt with current datetime + user name"
 ```
 
 ---
@@ -1494,7 +1582,7 @@ git commit -m "feat(llm): tool schemas and dispatcher"
 ```python
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1502,6 +1590,9 @@ import pytest
 import db as db_module
 import scheduler
 from llm.agent import LLMAgent
+
+MSK = timezone(timedelta(hours=3))
+FIXED_NOW = datetime(2026, 5, 21, 14, 30, tzinfo=MSK)
 
 
 @dataclass
@@ -1537,7 +1628,7 @@ def fake_scheduler(monkeypatch):
 
 
 def _mk_agent(bot, client):
-    return LLMAgent(bot=bot, client=client, today_provider=lambda: date(2026, 5, 21))
+    return LLMAgent(bot=bot, client=client, now_provider=lambda: FIXED_NOW)
 
 
 @pytest.mark.asyncio
@@ -1548,12 +1639,46 @@ async def test_run_turn_simple_text_response(tmp_db, fake_bot, fake_scheduler):
     })
     agent = _mk_agent(fake_bot, client)
 
-    await agent.run_turn(user_id=1, text="привет")
+    await agent.run_turn(user_id=1, text="привет", user_name=None)
 
     assert len(fake_bot.sent) == 1
     assert fake_bot.sent[0]["text"] == "Привет! Чем помочь?"
     msgs = await db_module.get_recent_chat_messages(1, 100)
     assert [m["role"] for m in msgs] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_persists_user_name(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": "ок"
+    })
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=42, text="hi", user_name="Маша")
+
+    assert await db_module.get_user_name(42) == "Маша"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_passes_name_to_system_prompt(tmp_db, fake_bot, fake_scheduler):
+    captured = {}
+
+    async def fake_completion(messages, tools):
+        captured["messages"] = messages
+        return {"role": "assistant", "content": "ok"}
+
+    client = AsyncMock()
+    client.chat_completion = fake_completion
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="hi", user_name="Петя")
+
+    sys_msg = captured["messages"][0]
+    assert sys_msg["role"] == "system"
+    assert "Петя" in sys_msg["content"]
+    assert "2026-05-21" in sys_msg["content"]
+    assert "14:30" in sys_msg["content"]
 
 
 @pytest.mark.asyncio
@@ -1571,7 +1696,7 @@ async def test_run_turn_tool_call_then_response(tmp_db, fake_bot, fake_scheduler
     ])
     agent = _mk_agent(fake_bot, client)
 
-    await agent.run_turn(user_id=1, text="что у меня?")
+    await agent.run_turn(user_id=1, text="что у меня?", user_name=None)
 
     assert fake_bot.sent[-1]["text"] == "У тебя нет активных отслеживаний."
     msgs = await db_module.get_recent_chat_messages(1, 100)
@@ -1592,7 +1717,7 @@ async def test_run_turn_max_turns_safeguard(tmp_db, fake_bot, fake_scheduler, mo
         }],
     })
     agent = _mk_agent(fake_bot, client)
-    await agent.run_turn(user_id=1, text="loop")
+    await agent.run_turn(user_id=1, text="loop", user_name=None)
     assert "Запутался" in fake_bot.sent[-1]["text"] or "переформулируй" in fake_bot.sent[-1]["text"].lower()
 
 
@@ -1604,7 +1729,7 @@ async def test_run_turn_http_error_yields_friendly_message(tmp_db, fake_bot, fak
         side_effect=httpx.RequestError("connection refused", request=None),
     )
     agent = _mk_agent(fake_bot, client)
-    await agent.run_turn(user_id=1, text="ping")
+    await agent.run_turn(user_id=1, text="ping", user_name=None)
     assert len(fake_bot.sent) == 1
     assert "AI" in fake_bot.sent[0]["text"] or "ошибк" in fake_bot.sent[0]["text"].lower()
 
@@ -1618,8 +1743,8 @@ async def test_run_turn_per_user_lock_is_per_user(tmp_db, fake_bot, fake_schedul
         "role": "assistant", "content": "ok"
     })
     agent = _mk_agent(fake_bot, client)
-    await agent.run_turn(user_id=1, text="a")
-    await agent.run_turn(user_id=2, text="b")
+    await agent.run_turn(user_id=1, text="a", user_name=None)
+    await agent.run_turn(user_id=2, text="b", user_name=None)
     assert len(fake_bot.sent) == 2
 ```
 
@@ -1633,7 +1758,7 @@ Expected: `ModuleNotFoundError`.
 import asyncio
 import json
 import logging
-from datetime import date
+from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
 import httpx
@@ -1647,17 +1772,23 @@ from llm.tools import TOOL_SCHEMAS, ToolContext, dispatch_tool
 
 logger = logging.getLogger(__name__)
 
+_MSK = timezone(timedelta(hours=3))
+
+
+def _default_now() -> datetime:
+    return datetime.now(_MSK)
+
 
 class LLMAgent:
     def __init__(
         self,
         bot: Any,
         client: OpenRouterClient,
-        today_provider: Callable[[], date] = date.today,
+        now_provider: Callable[[], datetime] = _default_now,
     ) -> None:
         self._bot = bot
         self._client = client
-        self._today = today_provider
+        self._now = now_provider
         self._locks: dict[int, asyncio.Lock] = {}
 
     def _lock_for(self, user_id: int) -> asyncio.Lock:
@@ -1665,8 +1796,9 @@ class LLMAgent:
             self._locks[user_id] = asyncio.Lock()
         return self._locks[user_id]
 
-    async def run_turn(self, user_id: int, text: str) -> None:
+    async def run_turn(self, user_id: int, text: str, user_name: str | None) -> None:
         async with self._lock_for(user_id):
+            await db_module.set_user_name(user_id, user_name)
             await db_module.insert_chat_message(user_id, "user", content=text)
             await self._drive_turn(user_id)
 
@@ -1674,8 +1806,11 @@ class LLMAgent:
         for _turn in range(OPENROUTER_MAX_TURNS):
             try:
                 rows = await db_module.get_recent_chat_messages(user_id, LLM_HISTORY_SIZE)
+                stored_name = await db_module.get_user_name(user_id)
                 messages = [{"role": "system",
-                             "content": build_system_prompt(today=self._today())}]
+                             "content": build_system_prompt(
+                                 now=self._now(), user_name=stored_name,
+                             )}]
                 messages.extend(to_openai_messages(rows))
                 msg = await self._client.chat_completion(
                     messages=messages, tools=TOOL_SCHEMAS,
@@ -1740,13 +1875,13 @@ Run:
 ```bash
 OPENROUTER_API_KEY=test OPENROUTER_MODEL=test/model pytest tests/test_llm_agent.py -v
 ```
-Expected: 5 passed.
+Expected: 7 passed (включая 2 новых: persist name + name in prompt).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add llm/agent.py tests/test_llm_agent.py
-git commit -m "feat(llm): basic agent run_turn with tool calling loop"
+git commit -m "feat(llm): agent run_turn with user_name + tz-aware now"
 ```
 
 ---
@@ -1777,7 +1912,7 @@ async def test_run_turn_ask_user_creates_pending(tmp_db, fake_bot, fake_schedule
     })
     agent = _mk_agent(fake_bot, client)
 
-    await agent.run_turn(user_id=1, text="удали")
+    await agent.run_turn(user_id=1, text="удали", user_name=None)
 
     assert len(fake_bot.sent) == 1
     assert "Какое отслеживание" in fake_bot.sent[0]["text"]
@@ -1856,7 +1991,7 @@ async def test_run_turn_auto_cancels_pending(tmp_db, fake_bot, fake_scheduler):
         1, "c1", "ask_user", json.dumps(["x"]), 100,
     )
 
-    await agent.run_turn(user_id=1, text="забей, что у меня?")
+    await agent.run_turn(user_id=1, text="забей, что у меня?", user_name=None)
 
     assert await db_module.get_pending_tool_call(1) is None
     msgs = await db_module.get_recent_chat_messages(1, 100)
@@ -1977,7 +2112,7 @@ Run:
 ```bash
 OPENROUTER_API_KEY=test OPENROUTER_MODEL=test/model pytest tests/test_llm_agent.py -v
 ```
-Expected: все passed (9 total).
+Expected: все passed (11 total — 7 базовых + 4 ask_user).
 
 - [ ] **Step 5: Commit**
 
@@ -2006,7 +2141,8 @@ async def test_handle_photo_vision_disabled(tmp_db, fake_bot, fake_scheduler, mo
     agent = _mk_agent(fake_bot, client)
 
     await agent.handle_photo(
-        user_id=1, image_bytes=b"\x00\x01", mime="image/jpeg", caption="что это?",
+        user_id=1, image_bytes=b"\x00\x01", mime="image/jpeg",
+        caption="что это?", user_name=None,
     )
 
     assert len(fake_bot.sent) == 1
@@ -2031,7 +2167,8 @@ async def test_handle_photo_vision_enabled_sends_to_llm(tmp_db, fake_bot, fake_s
     agent = _mk_agent(fake_bot, client)
 
     await agent.handle_photo(
-        user_id=1, image_bytes=b"\xff\xd8\xff", mime="image/jpeg", caption="опиши",
+        user_id=1, image_bytes=b"\xff\xd8\xff", mime="image/jpeg",
+        caption="опиши", user_name="Маша",
     )
 
     # последнее user-сообщение в LLM — multimodal
@@ -2069,6 +2206,7 @@ from config import OPENROUTER_MAX_TURNS, LLM_HISTORY_SIZE, LLM_VISION
         image_bytes: bytes,
         mime: str,
         caption: str | None,
+        user_name: str | None,
     ) -> None:
         if not LLM_VISION:
             msg = ("Текущая модель не умеет читать фото. "
@@ -2077,6 +2215,7 @@ from config import OPENROUTER_MAX_TURNS, LLM_HISTORY_SIZE, LLM_VISION
             return
 
         async with self._lock_for(user_id):
+            await db_module.set_user_name(user_id, user_name)
             await self._auto_cancel_pending(user_id)
             caption_text = caption or ""
             placeholder = f"[photo] {caption_text}".strip()
@@ -2173,7 +2312,8 @@ async def test_handle_audio_disabled_no_stt(tmp_db, fake_bot, fake_scheduler, mo
     agent = _mk_agent(fake_bot, client)
 
     await agent.handle_audio(
-        user_id=1, audio_bytes=b"\x00", audio_format="ogg", caption=None,
+        user_id=1, audio_bytes=b"\x00", audio_format="ogg",
+        caption=None, user_name=None,
     )
 
     assert len(fake_bot.sent) == 1
@@ -2195,7 +2335,8 @@ async def test_handle_audio_via_stt_then_run_turn(tmp_db, fake_bot, fake_schedul
     agent = _mk_agent(fake_bot, client)
 
     await agent.handle_audio(
-        user_id=1, audio_bytes=b"\xff", audio_format="ogg", caption=None,
+        user_id=1, audio_bytes=b"\xff", audio_format="ogg",
+        caption=None, user_name="Маша",
     )
 
     client.transcribe.assert_called_once()
@@ -2221,7 +2362,8 @@ async def test_handle_audio_native_multimodal(tmp_db, fake_bot, fake_scheduler, 
     agent = _mk_agent(fake_bot, client)
 
     await agent.handle_audio(
-        user_id=1, audio_bytes=b"\xff\xd8", audio_format="ogg", caption=None,
+        user_id=1, audio_bytes=b"\xff\xd8", audio_format="ogg",
+        caption=None, user_name=None,
     )
 
     user_msg = next(m for m in reversed(captured["messages"]) if m["role"] == "user")
@@ -2245,7 +2387,8 @@ async def test_handle_audio_stt_failure(tmp_db, fake_bot, fake_scheduler, monkey
     agent = _mk_agent(fake_bot, client)
 
     await agent.handle_audio(
-        user_id=1, audio_bytes=b"\x00", audio_format="ogg", caption=None,
+        user_id=1, audio_bytes=b"\x00", audio_format="ogg",
+        caption=None, user_name=None,
     )
 
     assert "не удалось" in fake_bot.sent[-1]["text"].lower() or "ошибк" in fake_bot.sent[-1]["text"].lower()
@@ -2277,10 +2420,12 @@ from config import (
         audio_bytes: bytes,
         audio_format: str,
         caption: str | None,
+        user_name: str | None,
     ) -> None:
         # Случай 1: основная модель умеет аудио → multimodal как у фото
         if LLM_AUDIO:
             async with self._lock_for(user_id):
+                await db_module.set_user_name(user_id, user_name)
                 await self._auto_cancel_pending(user_id)
                 caption_text = caption or ""
                 placeholder = f"[audio] {caption_text}".strip()
@@ -2315,6 +2460,7 @@ from config import (
                 )
                 return
             async with self._lock_for(user_id):
+                await db_module.set_user_name(user_id, user_name)
                 await self._auto_cancel_pending(user_id)
                 placeholder = f"[voice] {text}"
                 await db_module.insert_chat_message(user_id, "user", content=placeholder)
@@ -2387,6 +2533,10 @@ def set_agent(agent: LLMAgent) -> None:
 Перед закрывающей строкой (после всех существующих `@router.message(...)` и `cmd_stop`) добавь fallback. **Важно: регистрируется ПОСЛЕДНИМ — приоритет команд и FSM не нарушится.**
 
 ```python
+def _user_display_name(u) -> str | None:
+    return (u.first_name or u.username or None) if u else None
+
+
 @router.message(F.photo)
 async def on_photo(message: Message, state: FSMContext):
     if await state.get_state() is not None:
@@ -2402,6 +2552,7 @@ async def on_photo(message: Message, state: FSMContext):
         image_bytes=image_bytes,
         mime="image/jpeg",
         caption=message.caption,
+        user_name=_user_display_name(message.from_user),
     )
 
 
@@ -2433,6 +2584,7 @@ async def on_voice_or_audio(message: Message, state: FSMContext):
         audio_bytes=audio_bytes,
         audio_format=audio_format,
         caption=message.caption,
+        user_name=_user_display_name(message.from_user),
     )
 
 
@@ -2445,7 +2597,11 @@ async def on_text_fallback(message: Message, state: FSMContext):
     if _agent is None:
         await message.answer("AI пока не настроен.")
         return
-    await _agent.run_turn(user_id=message.from_user.id, text=message.text)
+    await _agent.run_turn(
+        user_id=message.from_user.id,
+        text=message.text,
+        user_name=_user_display_name(message.from_user),
+    )
 
 
 @router.callback_query(F.data.startswith("ai:"))

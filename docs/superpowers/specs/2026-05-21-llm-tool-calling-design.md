@@ -79,7 +79,8 @@ Tool handlers получают `ctx` с `user_id` и `bot` — никогда н
 Содержит:
 - Роль: ассистент бота отслеживания мест в маршрутках Беларуси.
 - Жёсткое правило: отвечать **только по теме** (маршрутки, отслеживания, провайдеры). Оффтопик — вежливый отказ.
-- Сегодняшняя дата (для парсинга «завтра», «через неделю», «в субботу»).
+- **Текущая дата + время в часовом поясе Europe/Minsk** (UTC+3 без DST) — для парсинга «завтра», «через неделю», «в субботу», «через 30 минут», «сейчас». В Docker процесс часто работает в UTC — поэтому время берётся явно через `datetime.now(ZoneInfo("Europe/Minsk"))`, а не системное.
+- **Имя собеседника** (если известно) — берётся из Telegram (`first_name` или `username`) и сохраняется в таблицу `user_profiles` при каждом сообщении. LLM может обращаться по имени.
 - Список доступных провайдеров с display_name.
 - Список направлений (`mg_mnsk`, `mnsk_mg`).
 - Инструкция: при неопределённости параметров вызывать `ask_user`, а не угадывать.
@@ -107,6 +108,12 @@ CREATE TABLE pending_tool_calls (
     options_json TEXT NOT NULL,
     message_id   INTEGER NOT NULL,
     created_at   REAL NOT NULL
+);
+
+CREATE TABLE user_profiles (
+    user_id    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    updated_at REAL NOT NULL
 );
 ```
 
