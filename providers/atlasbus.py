@@ -1,5 +1,6 @@
 import httpx
 from .base import Trip
+from config import ATLAS_PROXY
 
 
 class AtlasBusProvider:
@@ -18,17 +19,29 @@ class AtlasBusProvider:
         direction: str,
     ) -> list[Trip]:
         from_id, to_id = self.directions[direction]
-        resp = await client.get(
-            self._url,
-            params={
-                "from_id": from_id,
-                "to_id": to_id,
-                "calendar_width": "1",
-                "date": date,
-                "passengers": "1",
-                "operatorId": "",
-            },
-        )
+        params = {
+            "from_id": from_id,
+            "to_id": to_id,
+            "calendar_width": "1",
+            "date": date,
+            "passengers": "1",
+            "operatorId": "",
+        }
+        headers = {
+            "Referer": "https://atlasbus.by/",
+            "Origin": "https://atlasbus.by",
+        }
+
+        if ATLAS_PROXY:
+            async with httpx.AsyncClient(
+                proxy=ATLAS_PROXY,
+                timeout=client.timeout,
+                headers=client.headers,
+            ) as proxied:
+                resp = await proxied.get(self._url, params=params, headers=headers)
+        else:
+            resp = await client.get(self._url, params=params, headers=headers)
+
         resp.raise_for_status()
         trips = []
         for t in resp.json().get("rides", []):

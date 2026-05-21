@@ -14,6 +14,16 @@ logger = logging.getLogger(__name__)
 _tasks: dict[int, asyncio.Task] = {}
 _bot: Any = None
 
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru,en-US;q=0.9,en;q=0.8",
+}
+
 
 def init_scheduler(bot: Any) -> None:
     global _bot
@@ -65,7 +75,7 @@ async def _poll_loop(watch: dict) -> None:
     provider = PROVIDERS[watch["provider"]]
     notified: set[str] = set(json.loads(watch["notified_trips"]))
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, headers=_HTTP_HEADERS) as client:
         while True:
             try:
                 all_trips = await provider.get_trips(client, watch["date"], watch["direction"])
