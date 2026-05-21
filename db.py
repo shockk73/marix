@@ -1,4 +1,5 @@
 import json
+import time
 import aiosqlite
 from datetime import datetime
 from config import DB_PATH
@@ -33,6 +34,23 @@ CREATE TABLE IF NOT EXISTS auth_attempts (
 )
 """
 
+_CREATE_CHAT_MESSAGES = """
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL,
+    role         TEXT NOT NULL,
+    content      TEXT,
+    tool_calls   TEXT,
+    tool_call_id TEXT,
+    created_at   REAL NOT NULL
+)
+"""
+
+_CREATE_CHAT_MESSAGES_IDX = """
+CREATE INDEX IF NOT EXISTS idx_chat_user_time
+ON chat_messages(user_id, id)
+"""
+
 MAX_AUTH_ATTEMPTS = 3
 
 
@@ -41,6 +59,8 @@ async def init_db():
         await conn.execute(_CREATE_TABLE)
         await conn.execute(_CREATE_AUTHORIZED)
         await conn.execute(_CREATE_AUTH_ATTEMPTS)
+        await conn.execute(_CREATE_CHAT_MESSAGES)
+        await conn.execute(_CREATE_CHAT_MESSAGES_IDX)
         await conn.commit()
 
 
@@ -145,5 +165,53 @@ async def update_notified_trips(watch_id: int, trip_ids: list[str]):
         await conn.execute(
             "UPDATE watches SET notified_trips = ? WHERE id = ?",
             (json.dumps(trip_ids), watch_id),
+        )
+        await conn.commit()
+
+
+async def insert_chat_message(
+    user_id: int,
+    role: str,
+    content: str | None = None,
+    tool_calls: str | None = None,
+    tool_call_id: str | None = None,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO chat_messages
+               (user_id, role, content, tool_calls, tool_call_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, role, content, tool_calls, tool_call_id, time.time()),
+        )
+        await conn.commit()
+
+
+async def get_recent_chat_messages(user_id: int, limit: int) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """SELECT * FROM (
+                 SELECT * FROM chat_messages
+                 WHERE user_id = ?
+                 ORDER BY id DESC
+                 LIMIT ?
+               ) ORDER BY id ASC""",
+            (user_id, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def prune_chat_messages(user_id: int, keep: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """DELETE FROM chat_messages
+               WHERE user_id = ?
+                 AND id NOT IN (
+                   SELECT id FROM chat_messages
+                   WHERE user_id = ?
+                   ORDER BY id DESC
+                   LIMIT ?
+                 )""",
+            (user_id, user_id, keep),
         )
         await conn.commit()
