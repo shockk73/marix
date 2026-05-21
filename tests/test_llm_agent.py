@@ -262,3 +262,50 @@ async def test_run_turn_auto_cancels_pending(tmp_db, fake_bot, fake_scheduler):
                 and m["tool_call_id"] == "c1"]
     assert len(canceled) == 1
     assert json.loads(canceled[0]["content"])["canceled"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_vision_disabled(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    monkeypatch.setattr("llm.agent.LLM_VISION", False)
+    client = AsyncMock()
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_photo(
+        user_id=1, image_bytes=b"\x00\x01", mime="image/jpeg",
+        caption="что это?", user_name=None,
+    )
+
+    assert len(fake_bot.sent) == 1
+    assert "не умеет" in fake_bot.sent[0]["text"].lower() or "vision" in fake_bot.sent[0]["text"].lower()
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assert len(msgs) == 0
+    client.chat_completion.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_vision_enabled_sends_to_llm(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    monkeypatch.setattr("llm.agent.LLM_VISION", True)
+    captured = {}
+
+    async def fake_completion(messages, tools):
+        captured["messages"] = messages
+        return {"role": "assistant", "content": "Вижу фото."}
+
+    client = AsyncMock()
+    client.chat_completion = fake_completion
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_photo(
+        user_id=1, image_bytes=b"\xff\xd8\xff", mime="image/jpeg",
+        caption="опиши", user_name="Маша",
+    )
+
+    user_msg = next(m for m in reversed(captured["messages"]) if m["role"] == "user")
+    assert isinstance(user_msg["content"], list)
+    assert any(p.get("type") == "image_url" for p in user_msg["content"])
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    user_rows = [m for m in msgs if m["role"] == "user"]
+    assert len(user_rows) == 1
+    assert "[photo]" in user_rows[0]["content"]
+    assert "опиши" in user_rows[0]["content"]
+    assert "data:image" not in user_rows[0]["content"]

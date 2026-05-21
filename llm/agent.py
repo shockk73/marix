@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 from datetime import datetime, timezone, timedelta
@@ -7,7 +8,7 @@ from typing import Any, Callable
 import httpx
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import OPENROUTER_MAX_TURNS, LLM_HISTORY_SIZE
+from config import OPENROUTER_MAX_TURNS, LLM_HISTORY_SIZE, LLM_VISION
 import db as db_module
 from llm.client import OpenRouterClient
 from llm.history import to_openai_messages
@@ -84,7 +85,52 @@ class LLMAgent:
         )
         await db_module.delete_pending_tool_call(user_id)
 
-    async def _drive_turn(self, user_id: int) -> None:
+    async def handle_photo(
+        self,
+        user_id: int,
+        image_bytes: bytes,
+        mime: str,
+        caption: str | None,
+        user_name: str | None,
+    ) -> None:
+        if not LLM_VISION:
+            msg = ("Текущая модель не умеет читать фото. "
+                   "Опиши текстом или поменяй модель в .env.")
+            await self._bot.send_message(user_id, msg)
+            return
+
+        async with self._lock_for(user_id):
+            await db_module.set_user_name(user_id, user_name)
+            await self._auto_cancel_pending(user_id)
+            caption_text = caption or ""
+            placeholder = f"[photo] {caption_text}".strip()
+            await db_module.insert_chat_message(user_id, "user", content=placeholder)
+            await self._drive_turn(
+                user_id,
+                _override_last_user=self._build_multimodal_user(image_bytes, mime, caption_text),
+            )
+
+    def _build_multimodal_user(
+        self,
+        image_bytes: bytes,
+        mime: str,
+        caption: str,
+    ) -> dict[str, Any]:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        parts: list[dict[str, Any]] = []
+        if caption:
+            parts.append({"type": "text", "text": caption})
+        parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"},
+        })
+        return {"role": "user", "content": parts}
+
+    async def _drive_turn(
+        self,
+        user_id: int,
+        _override_last_user: dict[str, Any] | None = None,
+    ) -> None:
         for _turn in range(OPENROUTER_MAX_TURNS):
             try:
                 rows = await db_module.get_recent_chat_messages(user_id, LLM_HISTORY_SIZE)
@@ -94,6 +140,12 @@ class LLMAgent:
                                  now=self._now(), user_name=stored_name,
                              )}]
                 messages.extend(to_openai_messages(rows))
+                if _override_last_user is not None:
+                    for i in range(len(messages) - 1, -1, -1):
+                        if messages[i]["role"] == "user":
+                            messages[i] = _override_last_user
+                            break
+                    _override_last_user = None
                 msg = await self._client.chat_completion(
                     messages=messages, tools=TOOL_SCHEMAS,
                 )
