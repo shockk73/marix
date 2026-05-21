@@ -1,19 +1,77 @@
-from aiogram import Router, F
+from typing import Any, Awaitable, Callable
+
+from aiogram import BaseMiddleware, Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    Message, CallbackQuery,
+    Message, CallbackQuery, TelegramObject,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
 from datetime import datetime
 
-from db import create_watch, get_user_watches, stop_watch as db_stop_watch
+from config import AUTH_CODE
+from db import (
+    MAX_AUTH_ATTEMPTS,
+    authorize_user, create_watch, get_user_watches, increment_failed_attempts,
+    is_authorized, is_banned, stop_watch as db_stop_watch,
+)
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS, DIRECTION_MG_MNSK, DIRECTION_MNSK_MG
 from scheduler import start_watch, cancel_watch
 
 router = Router()
+
+
+class AuthMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user is None:
+            return await handler(event, data)
+
+        if await is_authorized(user.id):
+            return await handler(event, data)
+
+        if await is_banned(user.id):
+            return None
+
+        if isinstance(event, Message) and event.text:
+            text = event.text.strip()
+            if text.startswith("/auth"):
+                parts = text.split(maxsplit=1)
+                code = parts[1].strip() if len(parts) > 1 else ""
+                if not code:
+                    await event.answer("Использование: /auth <код>")
+                    return None
+                if code == AUTH_CODE:
+                    await authorize_user(user.id)
+                    state: FSMContext | None = data.get("state")
+                    if state is not None:
+                        await state.clear()
+                    await event.answer("Доступ разрешён. /start — начать.")
+                    return None
+                failed = await increment_failed_attempts(user.id)
+                remaining = MAX_AUTH_ATTEMPTS - failed
+                if remaining <= 0:
+                    await event.answer("Неверный код. Вы заблокированы.")
+                else:
+                    await event.answer(f"Неверный код. Осталось попыток: {remaining}")
+                return None
+
+        if isinstance(event, Message):
+            await event.answer("Доступ ограничен. Авторизуйся: /auth <код>")
+        elif isinstance(event, CallbackQuery):
+            await event.answer("Нужен доступ: /auth <код>", show_alert=True)
+        return None
+
+
+router.message.outer_middleware(AuthMiddleware())
+router.callback_query.outer_middleware(AuthMiddleware())
 
 _DIRECTIONS = [
     (DIRECTION_MG_MNSK, DIRECTION_LABELS[DIRECTION_MG_MNSK]),
@@ -30,11 +88,16 @@ class WatchForm(StatesGroup):
     interval = State()
 
 
-def _providers_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=p.display_name, callback_data=f"prov:{key}")]
+def _providers_kb(selected: set[str]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text=f"{'☑️' if key in selected else '☐'} {p.display_name}",
+            callback_data=f"prov:{key}",
+        )]
         for key, p in PROVIDERS.items()
-    ])
+    ]
+    rows.append([InlineKeyboardButton(text="✅ Готово", callback_data="prov_done")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _directions_kb() -> InlineKeyboardMarkup:
@@ -57,14 +120,37 @@ async def cmd_start(message: Message):
 @router.message(Command("watch"))
 async def cmd_watch(message: Message, state: FSMContext):
     await state.set_state(WatchForm.provider)
-    await message.answer("Выбери провайдера:", reply_markup=_providers_kb())
+    await state.update_data(providers=[])
+    await message.answer(
+        "Выбери провайдеров (можно несколько), затем «Готово»:",
+        reply_markup=_providers_kb(set()),
+    )
 
 
 @router.callback_query(WatchForm.provider, F.data.startswith("prov:"))
-async def on_provider(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(provider=cb.data.split(":")[1])
+async def on_provider_toggle(cb: CallbackQuery, state: FSMContext):
+    key = cb.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected = set(data.get("providers", []))
+    if key in selected:
+        selected.discard(key)
+    else:
+        selected.add(key)
+    await state.update_data(providers=list(selected))
+    await cb.message.edit_reply_markup(reply_markup=_providers_kb(selected))
+    await cb.answer()
+
+
+@router.callback_query(WatchForm.provider, F.data == "prov_done")
+async def on_providers_done(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("providers", [])
+    if not selected:
+        await cb.answer("Выбери хотя бы одного провайдера", show_alert=True)
+        return
     await state.set_state(WatchForm.direction)
     await cb.message.edit_text("Направление:", reply_markup=_directions_kb())
+    await cb.answer()
 
 
 @router.callback_query(WatchForm.direction, F.data.startswith("dir:"))
@@ -122,33 +208,42 @@ async def on_interval(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
 
-    watch_id = await create_watch(
-        user_id=message.from_user.id,
-        provider=data["provider"],
-        direction=data["direction"],
-        date=data["date"],
-        time_from=data["time_from"],
-        time_to=data["time_to"],
-        interval_sec=interval,
-    )
-    watch = {
-        "id": watch_id,
-        "user_id": message.from_user.id,
-        "notified_trips": "[]",
-        **data,
-        "interval_sec": interval,
-    }
-    await start_watch(watch)
+    selected = data.get("providers", [])
+    if not selected:
+        await message.answer("Не выбрано ни одного провайдера. /watch — заново.")
+        return
 
-    p = PROVIDERS[data["provider"]]
+    created = []
+    for provider_key in selected:
+        watch_id = await create_watch(
+            user_id=message.from_user.id,
+            provider=provider_key,
+            direction=data["direction"],
+            date=data["date"],
+            time_from=data["time_from"],
+            time_to=data["time_to"],
+            interval_sec=interval,
+        )
+        await start_watch({
+            "id": watch_id,
+            "user_id": message.from_user.id,
+            "notified_trips": "[]",
+            "provider": provider_key,
+            "direction": data["direction"],
+            "date": data["date"],
+            "time_from": data["time_from"],
+            "time_to": data["time_to"],
+            "interval_sec": interval,
+        })
+        p = PROVIDERS[provider_key]
+        created.append(f"#{watch_id} {p.display_name} (/stop {watch_id})")
+
     dir_label = DIRECTION_LABELS[data["direction"]]
-    await message.answer(
-        f"Отслеживание #{watch_id} запущено!\n"
-        f"{p.display_name} | {dir_label}\n"
-        f"{data['date']}, {data['time_from']}–{data['time_to']}\n"
-        f"Интервал: {interval} сек\n\n"
-        f"Остановить: /stop {watch_id}"
-    )
+    lines = [f"Запущено отслеживаний: {len(created)}"]
+    lines.extend(created)
+    lines.append("")
+    lines.append(f"{dir_label}, {data['date']}, {data['time_from']}–{data['time_to']}, каждые {interval}с")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("list"))
