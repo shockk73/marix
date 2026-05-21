@@ -143,3 +143,59 @@ async def test_set_user_name_ignores_empty(tmp_db):
     await db_module.set_user_name(1, "")
     await db_module.set_user_name(1, None)
     assert await db_module.get_user_name(1) == "Маша"
+
+
+from llm.history import to_openai_messages
+
+
+def test_to_openai_messages_user_text():
+    rows = [
+        {"role": "user", "content": "привет", "tool_calls": None, "tool_call_id": None},
+    ]
+    result = to_openai_messages(rows)
+    assert result == [{"role": "user", "content": "привет"}]
+
+
+def test_to_openai_messages_assistant_text():
+    rows = [
+        {"role": "assistant", "content": "ответ", "tool_calls": None, "tool_call_id": None},
+    ]
+    assert to_openai_messages(rows) == [{"role": "assistant", "content": "ответ"}]
+
+
+def test_to_openai_messages_assistant_with_tool_calls():
+    tc = [{"id": "c1", "type": "function",
+           "function": {"name": "list_watches", "arguments": "{}"}}]
+    rows = [
+        {"role": "assistant", "content": None,
+         "tool_calls": json.dumps(tc), "tool_call_id": None},
+    ]
+    result = to_openai_messages(rows)
+    assert result == [{"role": "assistant", "content": None, "tool_calls": tc}]
+
+
+def test_to_openai_messages_tool_result():
+    rows = [
+        {"role": "tool", "content": '{"ok": true}',
+         "tool_calls": None, "tool_call_id": "c1"},
+    ]
+    result = to_openai_messages(rows)
+    assert result == [{"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'}]
+
+
+def test_to_openai_messages_mixed_sequence():
+    tc = [{"id": "c1", "type": "function",
+           "function": {"name": "list_watches", "arguments": "{}"}}]
+    rows = [
+        {"role": "user", "content": "что у меня?", "tool_calls": None, "tool_call_id": None},
+        {"role": "assistant", "content": None,
+         "tool_calls": json.dumps(tc), "tool_call_id": None},
+        {"role": "tool", "content": "[]", "tool_calls": None, "tool_call_id": "c1"},
+        {"role": "assistant", "content": "Ничего нет.", "tool_calls": None, "tool_call_id": None},
+    ]
+    result = to_openai_messages(rows)
+    assert len(result) == 4
+    assert result[0]["role"] == "user"
+    assert result[1]["tool_calls"] == tc
+    assert result[2]["role"] == "tool"
+    assert result[3]["content"] == "Ничего нет."
