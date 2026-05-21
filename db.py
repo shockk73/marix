@@ -19,11 +19,77 @@ CREATE TABLE IF NOT EXISTS watches (
 )
 """
 
+_CREATE_AUTHORIZED = """
+CREATE TABLE IF NOT EXISTS authorized_users (
+    user_id       INTEGER PRIMARY KEY,
+    authorized_at TEXT NOT NULL
+)
+"""
+
+_CREATE_AUTH_ATTEMPTS = """
+CREATE TABLE IF NOT EXISTS auth_attempts (
+    user_id      INTEGER PRIMARY KEY,
+    failed_count INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+MAX_AUTH_ATTEMPTS = 3
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(_CREATE_TABLE)
+        await conn.execute(_CREATE_AUTHORIZED)
+        await conn.execute(_CREATE_AUTH_ATTEMPTS)
         await conn.commit()
+
+
+async def is_authorized(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM authorized_users WHERE user_id = ?",
+            (user_id,),
+        )
+        return await cur.fetchone() is not None
+
+
+async def authorize_user(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT OR IGNORE INTO authorized_users (user_id, authorized_at) VALUES (?, ?)",
+            (user_id, datetime.now().isoformat()),
+        )
+        await conn.commit()
+
+
+async def get_failed_attempts(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT failed_count FROM auth_attempts WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else 0
+
+
+async def increment_failed_attempts(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO auth_attempts (user_id, failed_count) VALUES (?, 1)
+               ON CONFLICT(user_id) DO UPDATE SET failed_count = failed_count + 1""",
+            (user_id,),
+        )
+        await conn.commit()
+        cur = await conn.execute(
+            "SELECT failed_count FROM auth_attempts WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        return row[0]
+
+
+async def is_banned(user_id: int) -> bool:
+    return await get_failed_attempts(user_id) >= MAX_AUTH_ATTEMPTS
 
 
 async def create_watch(

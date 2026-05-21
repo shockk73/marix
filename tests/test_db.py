@@ -77,3 +77,46 @@ async def test_get_user_watches(tmp_db):
     watches = await db_module.get_user_watches(123)
     assert len(watches) == 2
     assert all(w["user_id"] == 123 for w in watches)
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_by_default(tmp_db):
+    assert await db_module.is_authorized(111) is False
+
+
+@pytest.mark.asyncio
+async def test_authorize_and_check(tmp_db):
+    await db_module.authorize_user(222)
+    assert await db_module.is_authorized(222) is True
+    assert await db_module.is_authorized(223) is False
+
+
+@pytest.mark.asyncio
+async def test_authorize_user_idempotent(tmp_db):
+    await db_module.authorize_user(333)
+    await db_module.authorize_user(333)
+    assert await db_module.is_authorized(333) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_attempts_default_zero(tmp_db):
+    assert await db_module.get_failed_attempts(444) == 0
+    assert await db_module.is_banned(444) is False
+
+
+@pytest.mark.asyncio
+async def test_increment_failed_attempts(tmp_db):
+    assert await db_module.increment_failed_attempts(555) == 1
+    assert await db_module.increment_failed_attempts(555) == 2
+    assert await db_module.is_banned(555) is False
+    assert await db_module.increment_failed_attempts(555) == 3
+    assert await db_module.is_banned(555) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_attempts_isolated_per_user(tmp_db):
+    await db_module.increment_failed_attempts(666)
+    await db_module.increment_failed_attempts(666)
+    await db_module.increment_failed_attempts(777)
+    assert await db_module.get_failed_attempts(666) == 2
+    assert await db_module.get_failed_attempts(777) == 1
