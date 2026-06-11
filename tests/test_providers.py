@@ -2,11 +2,20 @@ import pytest
 import httpx
 import respx
 
-from providers.base import Trip, DIRECTION_MG_MNSK, DIRECTION_MNSK_MG, DIRECTION_LABELS
+from providers.base import (
+    Trip,
+    DIRECTION_BOBR_MG,
+    DIRECTION_BOBR_MNSK,
+    DIRECTION_MG_BOBR,
+    DIRECTION_MG_MNSK,
+    DIRECTION_MNSK_BOBR,
+    DIRECTION_MNSK_MG,
+    DIRECTION_LABELS,
+)
 from providers.timetable_base import TimetableBaseProvider
 from providers.mogilevminsk import MogilevMinskProvider
 from providers.avto_slava import AvtoSlavaProvider
-from providers.buspro import BusProProvider
+from providers.buspro import BusProProvider, MagnitPlusProvider
 from providers.atlasbus import AtlasBusProvider
 
 
@@ -29,8 +38,13 @@ def test_trip_fields():
 def test_direction_constants():
     assert DIRECTION_MG_MNSK == "mg_mnsk"
     assert DIRECTION_MNSK_MG == "mnsk_mg"
+    assert DIRECTION_MG_BOBR == "mg_bobr"
+    assert DIRECTION_BOBR_MG == "bobr_mg"
+    assert DIRECTION_MNSK_BOBR == "mnsk_bobr"
+    assert DIRECTION_BOBR_MNSK == "bobr_mnsk"
     assert "Могилёв" in DIRECTION_LABELS[DIRECTION_MG_MNSK]
     assert "Минск" in DIRECTION_LABELS[DIRECTION_MNSK_MG]
+    assert "Бобруйск" in DIRECTION_LABELS[DIRECTION_MG_BOBR]
 
 
 TIMETABLE_RESPONSE = {
@@ -167,13 +181,17 @@ BUSPRO_RESPONSE = [
 @pytest.mark.asyncio
 @respx.mock
 async def test_buspro_parses_trips():
-    respx.get(url__startswith="https://buspro.by/api/trip").mock(
+    route = respx.get(url__startswith="https://buspro.by/api/trip").mock(
         return_value=httpx.Response(200, json=BUSPRO_RESPONSE)
     )
     provider = BusProProvider()
     async with httpx.AsyncClient() as client:
         trips = await provider.get_trips(client, "2026-05-24", DIRECTION_MG_MNSK)
 
+    params = route.calls[0].request.url.params
+    assert params["s[company_id]"] == "8"
+    assert params["s[city_departure_id]"] == "30"
+    assert params["s[city_destination_id]"] == "37"
     assert len(trips) == 2
     assert trips[0].trip_id == "3601390"
     assert trips[0].departure_time == "08:00"
@@ -185,8 +203,35 @@ async def test_buspro_parses_trips():
 def test_buspro_config():
     p = BusProProvider()
     assert p.display_name == "Гранд Экспресс"
+    assert p.company_id == "8"
     assert p.directions["mg_mnsk"] == ("30", "37")
     assert p.directions["mnsk_mg"] == ("37", "30")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_magnitplus_parses_trips():
+    route = respx.get(url__startswith="https://buspro.by/api/trip").mock(
+        return_value=httpx.Response(200, json=BUSPRO_RESPONSE)
+    )
+    provider = MagnitPlusProvider()
+    async with httpx.AsyncClient() as client:
+        trips = await provider.get_trips(client, "2026-05-24", DIRECTION_MG_BOBR)
+
+    params = route.calls[0].request.url.params
+    assert params["s[company_id]"] == "5"
+    assert params["s[city_departure_id]"] == "16"
+    assert params["s[city_destination_id]"] == "17"
+    assert trips[0].provider == "magnitplus"
+    assert trips[0].free_seats == 10
+
+
+def test_magnitplus_config():
+    p = MagnitPlusProvider()
+    assert p.display_name == "Магнит Плюс"
+    assert p.company_id == "5"
+    assert p.directions["mg_bobr"] == ("16", "17")
+    assert p.directions["bobr_mg"] == ("17", "16")
 
 
 ATLASBUS_RESPONSE = {
@@ -253,17 +298,36 @@ def test_atlasbus_config():
     assert p.display_name == "Атласбус"
     assert p.directions["mg_mnsk"] == ("c625665", "c625144")
     assert p.directions["mnsk_mg"] == ("c625144", "c625665")
+    assert p.directions["mg_bobr"] == ("c625665", "c630468")
+    assert p.directions["bobr_mg"] == ("c630468", "c625665")
+    assert p.directions["mnsk_bobr"] == ("c625144", "c630468")
+    assert p.directions["bobr_mnsk"] == ("c630468", "c625144")
 
 
 from providers import PROVIDERS
 
 
 def test_registry_has_all_providers():
-    assert set(PROVIDERS.keys()) == {"mogilevminsk", "avto_slava", "buspro", "atlasbus"}
+    assert set(PROVIDERS.keys()) == {
+        "mogilevminsk", "avto_slava", "buspro", "magnitplus", "atlasbus"
+    }
     for key, p in PROVIDERS.items():
         assert hasattr(p, "name")
         assert hasattr(p, "display_name")
         assert hasattr(p, "directions")
         assert hasattr(p, "get_trips")
-        assert "mg_mnsk" in p.directions
-        assert "mnsk_mg" in p.directions
+        if key != "magnitplus":
+            assert "mg_mnsk" in p.directions
+            assert "mnsk_mg" in p.directions
+
+
+def test_bobruisk_direction_support():
+    bobruisk_directions = {"mg_bobr", "bobr_mg", "mnsk_bobr", "bobr_mnsk"}
+    for key, provider in PROVIDERS.items():
+        if key == "atlasbus":
+            assert bobruisk_directions <= set(provider.directions)
+        elif key == "magnitplus":
+            assert {"mg_bobr", "bobr_mg"} <= set(provider.directions)
+            assert {"mnsk_bobr", "bobr_mnsk"}.isdisjoint(provider.directions)
+        else:
+            assert set(provider.directions).isdisjoint(bobruisk_directions)

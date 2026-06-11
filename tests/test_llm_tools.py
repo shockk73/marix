@@ -86,6 +86,40 @@ async def test_dispatch_create_watch_creates_and_starts(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_create_watch_supports_bobruisk_providers(tmp_db, fake_scheduler):
+    ctx = ToolContext(user_id=1)
+    args = {
+        "providers": ["atlasbus", "magnitplus"],
+        "direction": "mg_bobr",
+        "date": "2026-05-24",
+        "time_from": "11:00",
+        "time_to": "23:00",
+        "interval_sec": 120,
+    }
+    result = await dispatch_tool("create_watch", args, ctx)
+    data = json.loads(result)
+    assert len(data["created_ids"]) == 2
+    assert len(fake_scheduler.started) == 2
+    watches = await db_module.get_user_watches(1)
+    assert {w["provider"] for w in watches} == {"atlasbus", "magnitplus"}
+    assert {w["direction"] for w in watches} == {"mg_bobr"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_create_watch_rejects_unsupported_direction(tmp_db, fake_scheduler):
+    ctx = ToolContext(user_id=1)
+    result = await dispatch_tool("create_watch", {
+        "providers": ["buspro"], "direction": "mg_bobr",
+        "date": "2026-05-24", "time_from": "11:00", "time_to": "23:00",
+        "interval_sec": 120,
+    }, ctx)
+    data = json.loads(result)
+    assert "error" in data
+    assert "buspro" in data["error"]
+    assert len(await db_module.get_user_watches(1)) == 0
+
+
+@pytest.mark.asyncio
 async def test_dispatch_create_watch_invalid_provider(tmp_db, fake_scheduler):
     ctx = ToolContext(user_id=1)
     result = await dispatch_tool("create_watch", {
@@ -173,6 +207,18 @@ async def test_dispatch_check_trips_now(monkeypatch, tmp_db):
     data = json.loads(result)
     assert len(data["trips"]) == 2
     assert data["trips"][0]["departure_time"] == "12:00"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_check_trips_now_rejects_unsupported_direction(tmp_db):
+    ctx = ToolContext(user_id=1)
+    result = await dispatch_tool("check_trips_now", {
+        "provider": "buspro", "direction": "mg_bobr",
+        "date": "2026-05-24", "time_from": "11:00", "time_to": "15:00",
+    }, ctx)
+    data = json.loads(result)
+    assert "error" in data
+    assert "buspro" in data["error"]
 
 
 @pytest.mark.asyncio

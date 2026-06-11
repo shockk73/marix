@@ -39,6 +39,7 @@ def test_system_prompt_lists_providers():
     assert "mogilevminsk" in prompt
     assert "avto_slava" in prompt
     assert "buspro" in prompt
+    assert "magnitplus" in prompt
     assert "atlasbus" in prompt
 
 
@@ -46,8 +47,11 @@ def test_system_prompt_lists_directions():
     prompt = build_system_prompt(now=NOW, user_name=None)
     assert "mg_mnsk" in prompt
     assert "mnsk_mg" in prompt
+    assert "mg_bobr" in prompt
+    assert "bobr_mnsk" in prompt
     assert "Могилёв" in prompt
     assert "Минск" in prompt
+    assert "Бобруйск" in prompt
 
 
 def test_system_prompt_instructs_to_use_ask_user():

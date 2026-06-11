@@ -42,8 +42,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "items": {"type": "string"},
                         "description": "Ключи провайдеров",
                     },
-                    "direction": {"type": "string",
-                                  "description": "mg_mnsk или mnsk_mg"},
+                    "direction": {
+                        "type": "string",
+                        "enum": list(DIRECTION_LABELS),
+                        "description": "Ключ направления",
+                    },
                     "date": {"type": "string", "description": "YYYY-MM-DD"},
                     "time_from": {"type": "string", "description": "HH:MM"},
                     "time_to": {"type": "string", "description": "HH:MM"},
@@ -87,7 +90,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "provider": {"type": "string"},
-                    "direction": {"type": "string"},
+                    "direction": {
+                        "type": "string",
+                        "enum": list(DIRECTION_LABELS),
+                    },
                     "date": {"type": "string", "description": "YYYY-MM-DD"},
                     "time_from": {"type": "string", "description": "HH:MM"},
                     "time_to": {"type": "string", "description": "HH:MM"},
@@ -152,6 +158,17 @@ def _valid_time(s: str) -> bool:
         return False
 
 
+def _unsupported_providers_for_direction(
+    provider_keys: list[str],
+    direction: str,
+) -> list[str]:
+    return [
+        provider_key
+        for provider_key in provider_keys
+        if direction not in PROVIDERS[provider_key].directions
+    ]
+
+
 async def _tool_list_watches(args: dict, ctx: ToolContext) -> str:
     watches = await db_module.get_user_watches(ctx.user_id)
     out = [{
@@ -182,6 +199,11 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
     if direction not in DIRECTION_LABELS:
         return _err(
             f"direction must be one of {list(DIRECTION_LABELS.keys())}"
+        )
+    unsupported = _unsupported_providers_for_direction(providers, direction)
+    if unsupported:
+        return _err(
+            f"direction {direction} is not supported by providers: {unsupported}"
         )
 
     date_s = args.get("date", "")
@@ -240,6 +262,10 @@ async def _tool_check_trips_now(args: dict, ctx: ToolContext) -> str:
     direction = args.get("direction")
     if direction not in DIRECTION_LABELS:
         return _err(f"direction must be one of {list(DIRECTION_LABELS.keys())}")
+    if direction not in PROVIDERS[provider_key].directions:
+        return _err(
+            f"direction {direction} is not supported by provider: {provider_key}"
+        )
     date_s = args.get("date", "")
     if not _valid_date(date_s):
         return _err("date must be YYYY-MM-DD")

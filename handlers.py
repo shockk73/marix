@@ -17,7 +17,7 @@ from db import (
     is_authorized, is_banned, stop_watch as db_stop_watch,
 )
 from providers import PROVIDERS
-from providers.base import DIRECTION_LABELS, DIRECTION_MG_MNSK, DIRECTION_MNSK_MG
+from providers.base import DIRECTION_LABELS
 from scheduler import start_watch, cancel_watch
 from llm.agent import LLMAgent
 
@@ -85,11 +85,6 @@ class AuthMiddleware(BaseMiddleware):
 router.message.outer_middleware(AuthMiddleware())
 router.callback_query.outer_middleware(AuthMiddleware())
 
-_DIRECTIONS = [
-    (DIRECTION_MG_MNSK, DIRECTION_LABELS[DIRECTION_MG_MNSK]),
-    (DIRECTION_MNSK_MG, DIRECTION_LABELS[DIRECTION_MNSK_MG]),
-]
-
 
 class WatchForm(StatesGroup):
     provider = State()
@@ -112,10 +107,25 @@ def _providers_kb(selected: set[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _directions_kb() -> InlineKeyboardMarkup:
+def _supported_directions(provider_keys: list[str]) -> list[tuple[str, str]]:
+    common = set(DIRECTION_LABELS)
+    for provider_key in provider_keys:
+        provider = PROVIDERS.get(provider_key)
+        if provider is None:
+            common = set()
+            break
+        common &= set(provider.directions)
+    return [
+        (key, label)
+        for key, label in DIRECTION_LABELS.items()
+        if key in common
+    ]
+
+
+def _directions_kb(provider_keys: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=label, callback_data=f"dir:{key}")]
-        for key, label in _DIRECTIONS
+        for key, label in _supported_directions(provider_keys)
     ])
 
 
@@ -160,14 +170,23 @@ async def on_providers_done(cb: CallbackQuery, state: FSMContext):
     if not selected:
         await cb.answer("Выбери хотя бы одного провайдера", show_alert=True)
         return
+    if not _supported_directions(selected):
+        await cb.answer("У выбранных провайдеров нет общих направлений", show_alert=True)
+        return
     await state.set_state(WatchForm.direction)
-    await cb.message.edit_text("Направление:", reply_markup=_directions_kb())
+    await cb.message.edit_text("Направление:", reply_markup=_directions_kb(selected))
     await cb.answer()
 
 
 @router.callback_query(WatchForm.direction, F.data.startswith("dir:"))
 async def on_direction(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(direction=cb.data.split(":")[1])
+    direction = cb.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected = data.get("providers", [])
+    if direction not in {key for key, _ in _supported_directions(selected)}:
+        await cb.answer("Это направление недоступно у выбранных провайдеров", show_alert=True)
+        return
+    await state.update_data(direction=direction)
     await state.set_state(WatchForm.date)
     await cb.message.edit_text("Введи дату (ГГГГ-ММ-ДД), например 2026-05-24:")
 
@@ -225,12 +244,25 @@ async def on_interval(message: Message, state: FSMContext):
         await message.answer("Не выбрано ни одного провайдера. /watch — заново.")
         return
 
+    direction = data["direction"]
+    unsupported = [
+        provider_key
+        for provider_key in selected
+        if direction not in PROVIDERS[provider_key].directions
+    ]
+    if unsupported:
+        names = ", ".join(PROVIDERS[key].display_name for key in unsupported)
+        await message.answer(
+            f"Направление {DIRECTION_LABELS[direction]} недоступно у: {names}. /watch — заново."
+        )
+        return
+
     created = []
     for provider_key in selected:
         watch_id = await create_watch(
             user_id=message.from_user.id,
             provider=provider_key,
-            direction=data["direction"],
+            direction=direction,
             date=data["date"],
             time_from=data["time_from"],
             time_to=data["time_to"],
@@ -241,7 +273,7 @@ async def on_interval(message: Message, state: FSMContext):
             "user_id": message.from_user.id,
             "notified_trips": "[]",
             "provider": provider_key,
-            "direction": data["direction"],
+            "direction": direction,
             "date": data["date"],
             "time_from": data["time_from"],
             "time_to": data["time_to"],
@@ -250,7 +282,7 @@ async def on_interval(message: Message, state: FSMContext):
         p = PROVIDERS[provider_key]
         created.append(f"#{watch_id} {p.display_name} (/stop {watch_id})")
 
-    dir_label = DIRECTION_LABELS[data["direction"]]
+    dir_label = DIRECTION_LABELS[direction]
     lines = [f"Запущено отслеживаний: {len(created)}"]
     lines.extend(created)
     lines.append("")

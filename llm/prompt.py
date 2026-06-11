@@ -6,7 +6,7 @@ from providers.base import DIRECTION_LABELS
 
 def build_system_prompt(now: datetime, user_name: str | None) -> str:
     providers_lines = [
-        f"  - {key} ({p.display_name})"
+        f"  - {key} ({p.display_name}): {', '.join(p.directions)}"
         for key, p in PROVIDERS.items()
     ]
     directions_lines = [
@@ -16,7 +16,7 @@ def build_system_prompt(now: datetime, user_name: str | None) -> str:
     tz_label = now.tzname() or "Europe/Minsk"
     parts = [
         "Ты — ассистент Telegram-бота, который отслеживает свободные места "
-        "в маршрутках между Могилёвом и Минском.",
+        "в маршрутках между Могилёвом, Минском и Бобруйском.",
         "",
         f"Сегодня: {now.date().isoformat()}, сейчас {now.strftime('%H:%M')} ({tz_label}).",
     ]

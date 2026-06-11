@@ -1,5 +1,13 @@
 import httpx
-from .base import Trip
+from .base import (
+    DIRECTION_BOBR_MG,
+    DIRECTION_BOBR_MNSK,
+    DIRECTION_MG_BOBR,
+    DIRECTION_MG_MNSK,
+    DIRECTION_MNSK_BOBR,
+    DIRECTION_MNSK_MG,
+    Trip,
+)
 from config import ATLAS_PROXY
 
 
@@ -7,8 +15,12 @@ class AtlasBusProvider:
     name = "atlasbus"
     display_name = "Атласбус"
     directions = {
-        "mg_mnsk": ("c625665", "c625144"),
-        "mnsk_mg": ("c625144", "c625665"),
+        DIRECTION_MG_MNSK: ("c625665", "c625144"),
+        DIRECTION_MNSK_MG: ("c625144", "c625665"),
+        DIRECTION_MG_BOBR: ("c625665", "c630468"),
+        DIRECTION_BOBR_MG: ("c630468", "c625665"),
+        DIRECTION_MNSK_BOBR: ("c625144", "c630468"),
+        DIRECTION_BOBR_MNSK: ("c630468", "c625144"),
     }
     _url = "https://atlasbus.by/api/search"
 
