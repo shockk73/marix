@@ -80,6 +80,30 @@ async def test_prune_does_not_affect_other_users(tmp_db):
 
 
 @pytest.mark.asyncio
+async def test_ensure_llm_session_version_resets_only_llm_state(tmp_db):
+    await db_module.insert_chat_message(1, "user", content="старый контекст")
+    await db_module.set_pending_tool_call(1, "call_1", "ask_user", "[]", 100)
+    await db_module.set_user_name(1, "Маша")
+    await db_module.create_watch(
+        1, "atlasbus", "mg_bobr", "2026-06-11", "11:00", "23:00", 120,
+    )
+
+    assert await db_module.ensure_llm_session_version("v1") is True
+
+    assert await db_module.get_recent_chat_messages(1, 100) == []
+    assert await db_module.get_pending_tool_call(1) is None
+    assert await db_module.get_user_name(1) == "Маша"
+    assert len(await db_module.get_user_watches(1)) == 1
+
+    await db_module.insert_chat_message(1, "user", content="новый контекст")
+    assert await db_module.ensure_llm_session_version("v1") is False
+    assert len(await db_module.get_recent_chat_messages(1, 100)) == 1
+
+    assert await db_module.ensure_llm_session_version("v2") is True
+    assert await db_module.get_recent_chat_messages(1, 100) == []
+
+
+@pytest.mark.asyncio
 async def test_set_and_get_pending(tmp_db):
     await db_module.set_pending_tool_call(
         user_id=1, tool_call_id="call_42", tool_name="ask_user",

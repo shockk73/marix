@@ -70,7 +70,16 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 )
 """
 
+_CREATE_APP_STATE = """
+CREATE TABLE IF NOT EXISTS app_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at REAL NOT NULL
+)
+"""
+
 MAX_AUTH_ATTEMPTS = 3
+LLM_SESSION_VERSION_KEY = "llm_session_version"
 
 
 async def init_db():
@@ -82,6 +91,7 @@ async def init_db():
         await conn.execute(_CREATE_CHAT_MESSAGES_IDX)
         await conn.execute(_CREATE_PENDING_TOOL_CALLS)
         await conn.execute(_CREATE_USER_PROFILES)
+        await conn.execute(_CREATE_APP_STATE)
         await conn.commit()
 
 
@@ -236,6 +246,37 @@ async def prune_chat_messages(user_id: int, keep: int) -> None:
             (user_id, user_id, keep),
         )
         await conn.commit()
+
+
+async def reset_llm_sessions() -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("DELETE FROM chat_messages")
+        await conn.execute("DELETE FROM pending_tool_calls")
+        await conn.commit()
+
+
+async def ensure_llm_session_version(version: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (LLM_SESSION_VERSION_KEY,),
+        )
+        row = await cur.fetchone()
+        if row and row[0] == version:
+            return False
+
+        await conn.execute("DELETE FROM chat_messages")
+        await conn.execute("DELETE FROM pending_tool_calls")
+        await conn.execute(
+            """INSERT INTO app_state (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                 value      = excluded.value,
+                 updated_at = excluded.updated_at""",
+            (LLM_SESSION_VERSION_KEY, version, time.time()),
+        )
+        await conn.commit()
+        return True
 
 
 async def set_pending_tool_call(

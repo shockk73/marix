@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 
 import db as db_module
 import scheduler
@@ -18,14 +19,23 @@ class FakeBot:
     sent: list = None
     edited: list = None
     _next_msg_id: int = 1000
+    fail_next_markdown: bool = False
 
     def __post_init__(self):
         self.sent = []
         self.edited = []
 
-    async def send_message(self, chat_id, text, reply_markup=None):
+    async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
+        if self.fail_next_markdown and parse_mode == "Markdown":
+            self.fail_next_markdown = False
+            raise TelegramBadRequest(method=None, message="can't parse entities")
         self._next_msg_id += 1
-        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        self.sent.append({
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": reply_markup,
+            "parse_mode": parse_mode,
+        })
         return type("M", (), {"message_id": self._next_msg_id})()
 
     async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None):
@@ -61,8 +71,25 @@ async def test_run_turn_simple_text_response(tmp_db, fake_bot, fake_scheduler):
 
     assert len(fake_bot.sent) == 1
     assert fake_bot.sent[0]["text"] == "Привет! Чем помочь?"
+    assert fake_bot.sent[0]["parse_mode"] == "Markdown"
     msgs = await db_module.get_recent_chat_messages(1, 100)
     assert [m["role"] for m in msgs] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_markdown_falls_back_to_plain_text(tmp_db, fake_bot, fake_scheduler):
+    fake_bot.fail_next_markdown = True
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": "*сломанная разметка",
+    })
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="привет", user_name=None)
+
+    assert len(fake_bot.sent) == 1
+    assert fake_bot.sent[0]["text"] == "*сломанная разметка"
+    assert fake_bot.sent[0]["parse_mode"] is None
 
 
 @pytest.mark.asyncio
@@ -185,6 +212,7 @@ async def test_run_turn_ask_user_creates_pending(tmp_db, fake_bot, fake_schedule
     assert len(fake_bot.sent) == 2
     question_msg = next(m for m in fake_bot.sent if m["reply_markup"] is not None)
     assert "Какое отслеживание" in question_msg["text"]
+    assert question_msg["parse_mode"] == "Markdown"
     kb = question_msg["reply_markup"]
     assert kb is not None
     p = await db_module.get_pending_tool_call(1)

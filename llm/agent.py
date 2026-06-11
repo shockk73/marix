@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
 import httpx
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import (
@@ -212,6 +213,27 @@ class LLMAgent:
         })
         return {"role": "user", "content": parts}
 
+    async def _send_markdown_message(
+        self,
+        user_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> Any:
+        try:
+            return await self._bot.send_message(
+                user_id,
+                text,
+                reply_markup=reply_markup,
+                parse_mode="Markdown",
+            )
+        except TelegramBadRequest as e:
+            logger.warning("Telegram Markdown parse failed, retrying plain text: %s", e)
+            return await self._bot.send_message(
+                user_id,
+                text,
+                reply_markup=reply_markup,
+            )
+
     async def _drive_turn(
         self,
         user_id: int,
@@ -254,7 +276,7 @@ class LLMAgent:
             if not tool_calls:
                 await db_module.insert_chat_message(user_id, "assistant", content=content)
                 if content:
-                    await self._bot.send_message(user_id, content)
+                    await self._send_markdown_message(user_id, content)
                 await db_module.prune_chat_messages(user_id, LLM_HISTORY_SIZE * 2)
                 return
 
@@ -265,7 +287,7 @@ class LLMAgent:
 
             if content:
                 try:
-                    await self._bot.send_message(user_id, content)
+                    await self._send_markdown_message(user_id, content)
                 except Exception as e:
                     logger.debug("preface message send failed: %s", e)
 
@@ -318,7 +340,7 @@ class LLMAgent:
         rows = [[InlineKeyboardButton(text=opt[:64], callback_data=f"ai:{i}")]
                 for i, opt in enumerate(options)]
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
-        sent = await self._bot.send_message(user_id, question, reply_markup=kb)
+        sent = await self._send_markdown_message(user_id, question, reply_markup=kb)
 
         await db_module.set_pending_tool_call(
             user_id=user_id, tool_call_id=tool_call_id,

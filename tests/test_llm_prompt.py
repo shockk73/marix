@@ -57,3 +57,10 @@ def test_system_prompt_lists_directions():
 def test_system_prompt_instructs_to_use_ask_user():
     prompt = build_system_prompt(now=NOW, user_name=None)
     assert "ask_user" in prompt
+
+
+def test_system_prompt_includes_telegram_markdown_rules():
+    prompt = build_system_prompt(now=NOW, user_name=None)
+    assert "parse_mode=Markdown" in prompt
+    assert "`avto_slava`" in prompt
+    assert "без разметки" in prompt

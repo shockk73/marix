@@ -3,6 +3,8 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
+LLM_SESSION_VERSION = "2026-06-11-markdown-routes-v1"
+
 
 def build_system_prompt(now: datetime, user_name: str | None) -> str:
     providers_lines = [
@@ -42,6 +44,11 @@ def build_system_prompt(now: datetime, user_name: str | None) -> str:
         "«через 30 минут», «сейчас») относительно текущих даты и времени выше.",
         "5. interval_sec — минимум 60. Если пользователь просит чаще — "
         "поставь 60 и предупреди.",
-        "6. Отвечай на русском, кратко и по делу.",
+        "6. Ответы отправляются в Telegram с parse_mode=Markdown. Соблюдай Telegram Markdown: "
+        "можно использовать *жирный*, _курсив_, `код`, ```блок кода``` и [текст](https://example.com). "
+        "Не используй таблицы Markdown, вложенную разметку и незакрытые символы разметки. "
+        "Ключи провайдеров, направлений, id задач и значения с подчёркиваниями всегда пиши в `коде`, "
+        "например `avto_slava`, `mg_bobr`, `/stop 12`. Если сомневаешься — пиши обычным текстом без разметки.",
+        "7. Отвечай на русском, кратко и по делу.",
     ]
     return "\n".join(parts)
