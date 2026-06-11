@@ -8,7 +8,7 @@ from .base import (
     DIRECTION_MNSK_MG,
     Trip,
 )
-from config import ATLAS_PROXY
+from .atlas_proxy import get_effective_atlas_proxy
 
 
 class AtlasBusProvider:
@@ -44,9 +44,10 @@ class AtlasBusProvider:
             "Origin": "https://atlasbus.by",
         }
 
-        if ATLAS_PROXY:
+        proxy = await get_effective_atlas_proxy()
+        if proxy:
             async with httpx.AsyncClient(
-                proxy=ATLAS_PROXY,
+                proxy=proxy,
                 timeout=client.timeout,
                 headers=client.headers,
             ) as proxied:

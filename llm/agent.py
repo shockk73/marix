@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
@@ -35,6 +36,10 @@ _TOOL_THINKING_LABELS = {
     "stop_all_watches": "Останавливаю все отслеживания…",
     "check_trips_now": "Проверяю рейсы сейчас…",
     "ask_user": "Уточняю…",
+    "get_atlas_proxy_status": "Смотрю настройки Atlas proxy…",
+    "set_atlas_proxy_target": "Меняю Atlas proxy target…",
+    "schedule_self_callback": "Планирую callback…",
+    "list_self_callbacks": "Смотрю отложенные callback-и…",
 }
 
 
@@ -49,6 +54,7 @@ class LLMAgent:
         self._client = client
         self._now = now_provider
         self._locks: dict[int, asyncio.Lock] = {}
+        self._callback_tasks: dict[int, asyncio.Task] = {}
 
     def _lock_for(self, user_id: int) -> asyncio.Lock:
         if user_id not in self._locks:
@@ -77,6 +83,61 @@ class LLMAgent:
     async def cancel_pending(self, user_id: int) -> None:
         async with self._lock_for(user_id):
             await self._auto_cancel_pending(user_id)
+
+    async def restore_scheduled_callbacks(self) -> None:
+        callbacks = await db_module.get_pending_agent_callbacks()
+        for callback in callbacks:
+            self._start_callback_task(callback)
+        logger.info("Restored %d pending agent callbacks", len(callbacks))
+
+    async def schedule_self_callback(self, user_id: int, run_at: float, prompt: str) -> int:
+        callback_id = await db_module.create_agent_callback(user_id, run_at, prompt)
+        self._start_callback_task({
+            "id": callback_id,
+            "user_id": user_id,
+            "run_at": run_at,
+            "prompt": prompt,
+        })
+        return callback_id
+
+    def _start_callback_task(self, callback: dict) -> None:
+        callback_id = callback["id"]
+        task = self._callback_tasks.get(callback_id)
+        if task and not task.done():
+            return
+        self._callback_tasks[callback_id] = asyncio.create_task(
+            self._run_callback_task(callback),
+            name=f"agent-callback-{callback_id}",
+        )
+
+    async def _run_callback_task(self, callback: dict) -> None:
+        callback_id = callback["id"]
+        try:
+            delay = max(0.0, float(callback["run_at"]) - time.time())
+            await asyncio.sleep(delay)
+            fresh = await db_module.get_agent_callback(callback_id)
+            if fresh is None or fresh["status"] != "pending":
+                return
+
+            user_id = fresh["user_id"]
+            async with self._lock_for(user_id):
+                await db_module.insert_chat_message(
+                    user_id,
+                    "user",
+                    content=(
+                        f"[scheduled callback #{callback_id}]\n"
+                        f"{fresh['prompt']}"
+                    ),
+                )
+                await self._drive_turn(user_id)
+            await db_module.mark_agent_callback_done(callback_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("Agent callback %s failed: %s", callback_id, e)
+            await db_module.mark_agent_callback_error(callback_id, f"{type(e).__name__}: {e}")
+        finally:
+            self._callback_tasks.pop(callback_id, None)
 
     async def _auto_cancel_pending(self, user_id: int) -> None:
         pending = await db_module.get_pending_tool_call(user_id)
@@ -291,7 +352,10 @@ class LLMAgent:
                 except Exception as e:
                     logger.debug("preface message send failed: %s", e)
 
-            ctx = ToolContext(user_id=user_id)
+            ctx = ToolContext(
+                user_id=user_id,
+                schedule_self_callback=self.schedule_self_callback,
+            )
             ask_user_pending = False
             for tc in tool_calls:
                 tc_id = tc["id"]

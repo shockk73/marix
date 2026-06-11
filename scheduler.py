@@ -5,7 +5,13 @@ from typing import Any
 
 import httpx
 
-from db import get_active_watches, update_notified_trips
+from db import (
+    get_active_watches,
+    mark_watch_check_error,
+    mark_watch_check_started,
+    mark_watch_check_success,
+    update_notified_trips,
+)
 from providers import PROVIDERS
 from providers.base import Trip, DIRECTION_LABELS
 
@@ -70,6 +76,13 @@ async def restore_watches() -> None:
     logger.info("Restored %d active watches", len(watches))
 
 
+def _format_watch_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        body = exc.response.text[:300] if exc.response is not None else ""
+        return f"HTTP {exc.response.status_code}: {body}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 async def _poll_loop(watch: dict) -> None:
     watch_id = watch["id"]
     provider = PROVIDERS[watch["provider"]]
@@ -78,9 +91,17 @@ async def _poll_loop(watch: dict) -> None:
     async with httpx.AsyncClient(timeout=15.0, headers=_HTTP_HEADERS) as client:
         while True:
             try:
+                await mark_watch_check_started(watch_id)
                 all_trips = await provider.get_trips(client, watch["date"], watch["direction"])
                 in_window = filter_trips_in_window(all_trips, watch["time_from"], watch["time_to"])
                 newly, notified = compute_newly_available(in_window, notified)
+                await mark_watch_check_success(
+                    watch_id=watch_id,
+                    total_trips=len(all_trips),
+                    window_trips=len(in_window),
+                    available_trips=sum(1 for t in in_window if t.free_seats > 0),
+                    newly_available=len(newly),
+                )
 
                 if newly:
                     await update_notified_trips(watch_id, list(notified))
@@ -89,6 +110,7 @@ async def _poll_loop(watch: dict) -> None:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
+                await mark_watch_check_error(watch_id, _format_watch_error(exc))
                 logger.error("Watch %d error: %s", watch_id, exc)
 
             try:

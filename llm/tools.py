@@ -1,20 +1,25 @@
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable
 
 import httpx
 
 import db as db_module
 import scheduler
 from providers import PROVIDERS
+from providers.atlas_proxy import (
+    get_atlas_proxy_status,
+    set_atlas_proxy_target,
+)
 from providers.base import DIRECTION_LABELS
 
 
 @dataclass
 class ToolContext:
     user_id: int
+    schedule_self_callback: Callable[[int, float, str], Awaitable[int]] | None = None
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -22,7 +27,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "list_watches",
-            "description": "Вернуть все активные отслеживания пользователя.",
+            "description": (
+                "Вернуть все активные отслеживания пользователя вместе со статусом "
+                "последней проверки, ошибками и метриками выполнения."
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -127,6 +135,79 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_atlas_proxy_status",
+            "description": (
+                "Показать безопасный статус Atlas proxy: включён ли proxy, "
+                "какая страна/ASN используются. Логин и пароль не возвращаются."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_atlas_proxy_target",
+            "description": (
+                "Изменить runtime-target для Atlas proxy, если Atlas даёт 429 "
+                "или текущий пул плохо работает. Меняет только country/ASN, "
+                "секреты из .env не раскрывает. BY/RU запрещены."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "country": {
+                        "type": "string",
+                        "description": "Двухбуквенный country code, например at, ch, sk, ua, cz, pl.",
+                    },
+                    "asn": {
+                        "type": "string",
+                        "description": "Опциональный ASN без AS-prefix, например 8412.",
+                    },
+                },
+                "required": ["country"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_self_callback",
+            "description": (
+                "Запланировать self-callback: агент сам вернётся в этот чат позже "
+                "и выполнит указанную инструкцию. Используй для напоминаний, "
+                "отложенных проверок и повторных действий через время."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "delay_seconds": {
+                        "type": "integer",
+                        "description": "Через сколько секунд выполнить callback. Минимум 10.",
+                    },
+                    "run_at": {
+                        "type": "string",
+                        "description": "Альтернатива delay_seconds: ISO-8601 дата/время с timezone.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Что агент должен сделать, когда callback сработает.",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_self_callbacks",
+            "description": "Показать pending self-callbacks агента для этого пользователя.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
@@ -169,8 +250,56 @@ def _unsupported_providers_for_direction(
     ]
 
 
+def _ts_iso(ts: float | None) -> str | None:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _parse_run_at(args: dict) -> tuple[float | None, str | None]:
+    delay = args.get("delay_seconds")
+    run_at = args.get("run_at")
+    if delay is None and not run_at:
+        return None, "delay_seconds or run_at is required"
+    if delay is not None:
+        if not isinstance(delay, int) or delay < 10:
+            return None, "delay_seconds must be integer >= 10"
+        return (datetime.now(timezone.utc) + timedelta(seconds=delay)).timestamp(), None
+    if not isinstance(run_at, str):
+        return None, "run_at must be an ISO-8601 string"
+    try:
+        dt = datetime.fromisoformat(run_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None, "run_at must be ISO-8601"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=3)))
+    timestamp = dt.astimezone(timezone.utc).timestamp()
+    if timestamp < datetime.now(timezone.utc).timestamp() + 10:
+        return None, "run_at must be at least 10 seconds in the future"
+    return timestamp, None
+
+
+def _watch_execution_payload(status: dict | None) -> dict:
+    if not status:
+        return {"status": "not_started"}
+    return {
+        "status": status["status"],
+        "last_check_started_at": _ts_iso(status["last_check_started_at"]),
+        "last_check_finished_at": _ts_iso(status["last_check_finished_at"]),
+        "last_success_at": _ts_iso(status["last_success_at"]),
+        "last_error_at": _ts_iso(status["last_error_at"]),
+        "last_error": status["last_error"],
+        "total_trips": status["total_trips"],
+        "window_trips": status["window_trips"],
+        "available_trips": status["available_trips"],
+        "newly_available": status["newly_available"],
+        "consecutive_errors": status["consecutive_errors"],
+    }
+
+
 async def _tool_list_watches(args: dict, ctx: ToolContext) -> str:
     watches = await db_module.get_user_watches(ctx.user_id)
+    statuses = await db_module.get_watch_statuses([w["id"] for w in watches])
     out = [{
         "id": w["id"],
         "provider": w["provider"],
@@ -181,6 +310,7 @@ async def _tool_list_watches(args: dict, ctx: ToolContext) -> str:
         "time_from": w["time_from"],
         "time_to": w["time_to"],
         "interval_sec": w["interval_sec"],
+        "execution": _watch_execution_payload(statuses.get(w["id"])),
     } for w in watches]
     return json.dumps({"watches": out}, ensure_ascii=False)
 
@@ -290,12 +420,64 @@ async def _tool_check_trips_now(args: dict, ctx: ToolContext) -> str:
     }, ensure_ascii=False)
 
 
+async def _tool_get_atlas_proxy_status(args: dict, ctx: ToolContext) -> str:
+    return json.dumps(await get_atlas_proxy_status(), ensure_ascii=False)
+
+
+async def _tool_set_atlas_proxy_target(args: dict, ctx: ToolContext) -> str:
+    country = args.get("country")
+    if not isinstance(country, str) or not country:
+        return _err("country must be a non-empty string")
+    asn = args.get("asn")
+    if asn is not None and not isinstance(asn, str):
+        return _err("asn must be a string")
+    try:
+        status = await set_atlas_proxy_target(country, asn)
+    except ValueError as e:
+        return _err(str(e))
+    return json.dumps(status, ensure_ascii=False)
+
+
+async def _tool_schedule_self_callback(args: dict, ctx: ToolContext) -> str:
+    if ctx.schedule_self_callback is None:
+        return _err("schedule_self_callback is not available in this context")
+    prompt = args.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return _err("prompt must be a non-empty string")
+    run_at, error = _parse_run_at(args)
+    if error:
+        return _err(error)
+    assert run_at is not None
+    callback_id = await ctx.schedule_self_callback(ctx.user_id, run_at, prompt.strip())
+    return json.dumps({
+        "callback_id": callback_id,
+        "run_at": _ts_iso(run_at),
+        "prompt": prompt.strip(),
+    }, ensure_ascii=False)
+
+
+async def _tool_list_self_callbacks(args: dict, ctx: ToolContext) -> str:
+    callbacks = await db_module.get_user_agent_callbacks(ctx.user_id)
+    return json.dumps({
+        "callbacks": [{
+            "id": cb["id"],
+            "run_at": _ts_iso(cb["run_at"]),
+            "prompt": cb["prompt"],
+            "status": cb["status"],
+        } for cb in callbacks],
+    }, ensure_ascii=False)
+
+
 _HANDLERS = {
     "list_watches": _tool_list_watches,
     "create_watch": _tool_create_watch,
     "stop_watch": _tool_stop_watch,
     "stop_all_watches": _tool_stop_all_watches,
     "check_trips_now": _tool_check_trips_now,
+    "get_atlas_proxy_status": _tool_get_atlas_proxy_status,
+    "set_atlas_proxy_target": _tool_set_atlas_proxy_target,
+    "schedule_self_callback": _tool_schedule_self_callback,
+    "list_self_callbacks": _tool_list_self_callbacks,
 }
 
 

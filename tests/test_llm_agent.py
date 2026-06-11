@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock
@@ -292,6 +294,35 @@ async def test_run_turn_auto_cancels_pending(tmp_db, fake_bot, fake_scheduler):
                 and m["tool_call_id"] == "c1"]
     assert len(canceled) == 1
     assert json.loads(canceled[0]["content"])["canceled"] is True
+
+
+@pytest.mark.asyncio
+async def test_self_callback_runs_agent_turn(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": "callback done",
+    })
+    agent = _mk_agent(fake_bot, client)
+
+    callback_id = await agent.schedule_self_callback(
+        user_id=1,
+        run_at=time.time() + 0.05,
+        prompt="проверь статус задач",
+    )
+
+    for _ in range(20):
+        callback = await db_module.get_agent_callback(callback_id)
+        if callback and callback["status"] == "done":
+            break
+        await asyncio.sleep(0.05)
+
+    callback = await db_module.get_agent_callback(callback_id)
+    assert callback["status"] == "done"
+    assert fake_bot.sent[-1]["text"] == "callback done"
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assert msgs[0]["role"] == "user"
+    assert "scheduled callback" in msgs[0]["content"]
+    assert "проверь статус задач" in msgs[0]["content"]
 
 
 @pytest.mark.asyncio

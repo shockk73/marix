@@ -104,6 +104,53 @@ async def test_ensure_llm_session_version_resets_only_llm_state(tmp_db):
 
 
 @pytest.mark.asyncio
+async def test_watch_status_lifecycle(tmp_db):
+    wid = await db_module.create_watch(
+        1, "atlasbus", "mg_bobr", "2026-06-11", "11:00", "23:00", 120,
+    )
+    await db_module.mark_watch_check_started(wid)
+    status = (await db_module.get_watch_statuses([wid]))[wid]
+    assert status["status"] == "checking"
+
+    await db_module.mark_watch_check_error(wid, "HTTP 429")
+    await db_module.mark_watch_check_error(wid, "HTTP 429 again")
+    status = (await db_module.get_watch_statuses([wid]))[wid]
+    assert status["status"] == "error"
+    assert status["consecutive_errors"] == 2
+    assert "429" in status["last_error"]
+
+    await db_module.mark_watch_check_success(
+        wid,
+        total_trips=10,
+        window_trips=4,
+        available_trips=2,
+        newly_available=1,
+    )
+    status = (await db_module.get_watch_statuses([wid]))[wid]
+    assert status["status"] == "ok"
+    assert status["consecutive_errors"] == 0
+    assert status["total_trips"] == 10
+    assert status["newly_available"] == 1
+    assert status["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_callbacks_lifecycle(tmp_db):
+    cid = await db_module.create_agent_callback(1, 1900000000.0, "сделай потом")
+    pending = await db_module.get_pending_agent_callbacks()
+    assert len(pending) == 1
+    assert pending[0]["id"] == cid
+    assert pending[0]["prompt"] == "сделай потом"
+
+    user_callbacks = await db_module.get_user_agent_callbacks(1)
+    assert len(user_callbacks) == 1
+
+    await db_module.mark_agent_callback_done(cid)
+    assert await db_module.get_user_agent_callbacks(1) == []
+    assert (await db_module.get_agent_callback(cid))["status"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_set_and_get_pending(tmp_db):
     await db_module.set_pending_tool_call(
         user_id=1, tool_call_id="call_42", tool_name="ask_user",

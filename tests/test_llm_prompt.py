@@ -64,3 +64,11 @@ def test_system_prompt_includes_telegram_markdown_rules():
     assert "parse_mode=Markdown" in prompt
     assert "`avto_slava`" in prompt
     assert "без разметки" in prompt
+
+
+def test_system_prompt_includes_status_proxy_and_callback_rules():
+    prompt = build_system_prompt(now=NOW, user_name=None)
+    assert "execution" in prompt
+    assert "get_atlas_proxy_status" in prompt
+    assert "set_atlas_proxy_target" in prompt
+    assert "schedule_self_callback" in prompt

@@ -38,6 +38,7 @@ async def main() -> None:
     )
     agent = LLMAgent(bot=bot, client=llm_client)
     set_agent(agent)
+    await agent.restore_scheduled_callbacks()
 
     try:
         await dp.start_polling(bot)

@@ -37,6 +37,8 @@ def test_tool_schemas_contains_all_expected_names():
     assert names == {
         "list_watches", "create_watch", "stop_watch",
         "stop_all_watches", "check_trips_now", "ask_user",
+        "get_atlas_proxy_status", "set_atlas_proxy_target",
+        "schedule_self_callback", "list_self_callbacks",
     }
 
 
@@ -58,12 +60,16 @@ async def test_dispatch_list_watches_empty(tmp_db, fake_scheduler):
 
 @pytest.mark.asyncio
 async def test_dispatch_list_watches_returns_active(tmp_db, fake_scheduler):
-    await db_module.create_watch(1, "atlasbus", "mg_mnsk", "2026-05-24", "11:00", "23:00", 120)
+    wid = await db_module.create_watch(1, "atlasbus", "mg_mnsk", "2026-05-24", "11:00", "23:00", 120)
+    await db_module.mark_watch_check_error(wid, "HTTP 429: Too Many Requests")
     ctx = ToolContext(user_id=1)
     result = await dispatch_tool("list_watches", {}, ctx)
     data = json.loads(result)
     assert len(data["watches"]) == 1
     assert data["watches"][0]["provider"] == "atlasbus"
+    assert data["watches"][0]["execution"]["status"] == "error"
+    assert data["watches"][0]["execution"]["consecutive_errors"] == 1
+    assert "429" in data["watches"][0]["execution"]["last_error"]
 
 
 @pytest.mark.asyncio
@@ -219,6 +225,71 @@ async def test_dispatch_check_trips_now_rejects_unsupported_direction(tmp_db):
     data = json.loads(result)
     assert "error" in data
     assert "buspro" in data["error"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_atlas_proxy_tools(tmp_db, fake_scheduler, monkeypatch):
+    monkeypatch.setattr(
+        "providers.atlas_proxy.ATLAS_PROXY",
+        "http://login__cr.pl:secret@gw.dataimpulse.com:823",
+    )
+
+    ctx = ToolContext(user_id=1)
+    result = await dispatch_tool("set_atlas_proxy_target", {
+        "country": "at",
+        "asn": "8412",
+    }, ctx)
+    data = json.loads(result)
+    assert data["configured"] is True
+    assert data["country"] == "at"
+    assert data["asn"] == "8412"
+    assert data["host"] == "gw.dataimpulse.com"
+    assert "secret" not in result
+    assert "login" not in result
+
+    status = json.loads(await dispatch_tool("get_atlas_proxy_status", {}, ctx))
+    assert status["source"] == "runtime_override"
+    assert status["country"] == "at"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_atlas_proxy_rejects_blocked_country(tmp_db, fake_scheduler, monkeypatch):
+    monkeypatch.setattr(
+        "providers.atlas_proxy.ATLAS_PROXY",
+        "http://login__cr.pl:secret@gw.dataimpulse.com:823",
+    )
+    ctx = ToolContext(user_id=1)
+    data = json.loads(await dispatch_tool("set_atlas_proxy_target", {"country": "ru"}, ctx))
+    assert "error" in data
+
+
+@pytest.mark.asyncio
+async def test_dispatch_schedule_self_callback(tmp_db, fake_scheduler):
+    calls = []
+
+    async def schedule(user_id, run_at, prompt):
+        calls.append((user_id, run_at, prompt))
+        return 7
+
+    ctx = ToolContext(user_id=1, schedule_self_callback=schedule)
+    result = await dispatch_tool("schedule_self_callback", {
+        "delay_seconds": 10,
+        "prompt": "проверь atlas proxy",
+    }, ctx)
+    data = json.loads(result)
+    assert data["callback_id"] == 7
+    assert calls[0][0] == 1
+    assert calls[0][2] == "проверь atlas proxy"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_list_self_callbacks(tmp_db, fake_scheduler):
+    await db_module.create_agent_callback(1, 1900000000.0, "проверь позже")
+    ctx = ToolContext(user_id=1)
+    result = await dispatch_tool("list_self_callbacks", {}, ctx)
+    data = json.loads(result)
+    assert len(data["callbacks"]) == 1
+    assert data["callbacks"][0]["prompt"] == "проверь позже"
 
 
 @pytest.mark.asyncio
