@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 from .base import (
     DIRECTION_BOBR_MG,
@@ -23,6 +25,8 @@ class AtlasBusProvider:
         DIRECTION_BOBR_MNSK: ("c630468", "c625144"),
     }
     _url = "https://atlasbus.by/api/search"
+    _max_attempts = 10
+    _retry_statuses = {429}
 
     async def get_trips(
         self,
@@ -44,16 +48,7 @@ class AtlasBusProvider:
             "Origin": "https://atlasbus.by",
         }
 
-        proxy = await get_effective_atlas_proxy()
-        if proxy:
-            async with httpx.AsyncClient(
-                proxy=proxy,
-                timeout=client.timeout,
-                headers=client.headers,
-            ) as proxied:
-                resp = await proxied.get(self._url, params=params, headers=headers)
-        else:
-            resp = await client.get(self._url, params=params, headers=headers)
+        resp = await self._request_with_retries(client, params, headers)
 
         resp.raise_for_status()
         trips = []
@@ -72,3 +67,31 @@ class AtlasBusProvider:
                 currency=t["currency"],
             ))
         return trips
+
+    async def _request_with_retries(
+        self,
+        client: httpx.AsyncClient,
+        params: dict[str, str],
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        last_response: httpx.Response | None = None
+        for attempt in range(1, self._max_attempts + 1):
+            proxy = await get_effective_atlas_proxy()
+            if proxy:
+                async with httpx.AsyncClient(
+                    proxy=proxy,
+                    timeout=client.timeout,
+                    headers=client.headers,
+                ) as proxied:
+                    resp = await proxied.get(self._url, params=params, headers=headers)
+            else:
+                resp = await client.get(self._url, params=params, headers=headers)
+
+            if resp.status_code not in self._retry_statuses:
+                return resp
+            last_response = resp
+            if attempt < self._max_attempts:
+                await asyncio.sleep(min(0.2 * attempt, 1.0))
+
+        assert last_response is not None
+        return last_response

@@ -1,6 +1,7 @@
 import pytest
 import httpx
 import respx
+from unittest.mock import AsyncMock
 
 from providers.base import (
     Trip,
@@ -291,6 +292,40 @@ async def test_atlasbus_parses_trips():
     assert trips[0].price == 30.0
     assert trips[0].currency == "BYN"
     assert trips[1].free_seats == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_atlasbus_retries_429(monkeypatch):
+    monkeypatch.setattr("providers.atlasbus.asyncio.sleep", AsyncMock())
+    route = respx.get(url__startswith="https://atlasbus.by/api/search").mock(
+        side_effect=[
+            httpx.Response(429, json={"message": "Too Many Requests"}),
+            httpx.Response(429, json={"message": "Too Many Requests"}),
+            httpx.Response(200, json=ATLASBUS_RESPONSE),
+        ]
+    )
+    provider = AtlasBusProvider()
+    async with httpx.AsyncClient() as client:
+        trips = await provider.get_trips(client, "2026-05-24", DIRECTION_MG_MNSK)
+
+    assert route.call_count == 3
+    assert len(trips) == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_atlasbus_stops_after_max_429_retries(monkeypatch):
+    monkeypatch.setattr("providers.atlasbus.asyncio.sleep", AsyncMock())
+    route = respx.get(url__startswith="https://atlasbus.by/api/search").mock(
+        return_value=httpx.Response(429, json={"message": "Too Many Requests"})
+    )
+    provider = AtlasBusProvider()
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await provider.get_trips(client, "2026-05-24", DIRECTION_MG_MNSK)
+
+    assert route.call_count == 10
 
 
 def test_atlasbus_config():
