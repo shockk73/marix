@@ -253,6 +253,46 @@ async def test_ask_user_form_invalid_returns_error_to_model(tmp_db, fake_bot, fa
 
 
 @pytest.mark.asyncio
+async def test_text_question_retried_into_buttons(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        {"role": "assistant", "content": "Хотите, чтобы я поставил слежку?"},
+        _screen_tool_call({
+            "text": "Поставить слежку?",
+            "buttons": [[{"label": "🔔 Следить", "value": "следить"},
+                         {"label": "Не надо", "value": "не надо"}]],
+        }),
+    ])
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="есть места?", user_name=None)
+
+    # текстовый вопрос перехвачен: ушёл экран с кнопками, а не голый текст
+    assert client.chat_completion.call_count == 2
+    retry_msgs = client.chat_completion.call_args_list[1].kwargs["messages"]
+    assert retry_msgs[-1]["role"] == "system"
+    assert "запрещено" in retry_msgs[-1]["content"]
+    screen = next(m for m in fake_bot.sent if m["reply_markup"] is not None)
+    assert "Поставить слежку" in screen["text"]
+    assert await db_module.get_pending_tool_call(1) is not None
+    assert all("Хотите, чтобы я" not in m["text"] for m in fake_bot.sent)
+
+
+@pytest.mark.asyncio
+async def test_text_question_retry_gives_up_after_one_try(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": "Ну что, едем?"})
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="хз", user_name=None)
+
+    # после одного ретрая ответ принимается как есть
+    assert client.chat_completion.call_count == 2
+    assert fake_bot.sent[-1]["text"] == "Ну что, едем?"
+
+
+@pytest.mark.asyncio
 async def test_new_message_cancels_form_with_partial_answers(tmp_db, fake_bot, fake_scheduler):
     client = AsyncMock()
     client.chat_completion = AsyncMock(side_effect=[

@@ -136,3 +136,37 @@ async def test_transcribe_uses_stt_model(mock_openrouter):
     parts = user_msg["content"]
     assert any(p.get("type") == "input_audio" for p in parts)
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_includes_reasoning_when_enabled(mock_openrouter):
+    route = mock_openrouter.post("/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }),
+    )
+    client = OpenRouterClient(api_key="k", model="m",
+                              base_url="https://openrouter.ai/api/v1",
+                              reasoning="low")
+    await client.chat_completion(messages=[{"role": "user", "content": "hi"}],
+                                 tools=[])
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["reasoning"] == {"effort": "low"}
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_no_reasoning_when_off(mock_openrouter):
+    route = mock_openrouter.post("/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }),
+    )
+    client = OpenRouterClient(api_key="k", model="m",
+                              base_url="https://openrouter.ai/api/v1",
+                              reasoning="off")
+    await client.chat_completion(messages=[{"role": "user", "content": "hi"}],
+                                 tools=[])
+    payload = json.loads(route.calls[0].request.content)
+    assert "reasoning" not in payload
+    await client.close()

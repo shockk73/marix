@@ -5,7 +5,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import (
-    BOT_TOKEN, OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_BASE_URL,
+    BOT_TOKEN, LLM_REASONING, OPENROUTER_API_KEY, OPENROUTER_MODEL,
+    OPENROUTER_BASE_URL,
 )
 from db import ensure_llm_session_version, init_db
 from handlers import router, set_agent
@@ -35,6 +36,7 @@ async def main() -> None:
         api_key=OPENROUTER_API_KEY,
         model=OPENROUTER_MODEL,
         base_url=OPENROUTER_BASE_URL,
+        reasoning=LLM_REASONING,
     )
     me = await bot.get_me()
     agent = LLMAgent(bot=bot, client=llm_client, bot_username=me.username)

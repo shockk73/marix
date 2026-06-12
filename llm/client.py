@@ -16,9 +16,11 @@ class OpenRouterClient:
         base_url: str,
         timeout: float = 60.0,
         retry_delay: float = 2.0,
+        reasoning: str = "off",
     ) -> None:
         self._model = model
         self._retry_delay = retry_delay
+        self._reasoning = reasoning if reasoning in ("low", "medium", "high") else None
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout,
@@ -37,6 +39,10 @@ class OpenRouterClient:
             "model": self._model,
             "messages": messages,
         }
+        if self._reasoning:
+            # OpenRouter unified reasoning: у gemini flash-lite thinking
+            # по умолчанию выключен, effort включает его
+            payload["reasoning"] = {"effort": self._reasoning}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

@@ -16,9 +16,9 @@ from config import AUTH_CODE
 from db import (
     MAX_AUTH_ATTEMPTS,
     authorize_user, clear_chat_session, create_watch, get_active_goal_booking,
-    get_active_watches, get_user_name, get_user_role, get_user_watches,
-    get_watch, increment_failed_attempts, is_authorized, is_banned,
-    set_user_role, stop_watch as db_stop_watch, use_invite,
+    get_active_watches, get_site_credentials, get_user_name, get_user_role,
+    get_user_watches, get_watch, increment_failed_attempts, is_authorized,
+    is_banned, set_user_role, stop_watch as db_stop_watch, use_invite,
 )
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
@@ -387,17 +387,41 @@ async def on_interval(message: Message, state: FSMContext):
     await message.answer("\n".join(lines))
 
 
-def _watch_line(w: dict) -> str:
+def _mask_phone(phone: str) -> str:
+    return f"{phone[:4]}…{phone[-2:]}" if len(phone) >= 6 else phone
+
+
+def _watch_line(w: dict, creds_connected: bool = False) -> str:
     p = PROVIDERS[w["provider"]]
     dir_label = DIRECTION_LABELS[w["direction"]]
     extra = ""
-    if (w.get("autobook") or "off") != "off":
-        extra = f", автобронь: {w['autobook']}"
+    if w["provider"] == "baranovichi_express":
+        mode = w.get("autobook") or "off"
+        if mode == "auto":
+            ab = "автобронь: ⚡ бронирую сам"
+        elif mode == "confirm":
+            ab = "автобронь: спрошу кнопкой"
+        elif creds_connected:
+            ab = "автобронь: выкл (в уведомлении будет кнопка брони)"
+        else:
+            ab = "автобронь: выкл (аккаунт не подключён)"
+        extra += f"\n  {ab}"
+    if w.get("pref_time_from"):
+        extra += f"\n  приоритет: {w['pref_time_from']}–{w['pref_time_to']}"
+    if w.get("pickup_stop") or w.get("dropoff_stop"):
+        extra += (f"\n  остановки: {w.get('pickup_stop') or 'главная'} → "
+                  f"{w.get('dropoff_stop') or 'главная'}")
     return (
         f"#{w['id']} {p.display_name} | {dir_label}\n"
         f"  {w['date']}, {w['time_from']}–{w['time_to']}, "
         f"каждые {w['interval_sec']}с{extra}"
     )
+
+
+def _account_line(creds: dict | None) -> str:
+    if creds is None:
+        return "Аккаунт Барановичи Экспресс: не подключён"
+    return f"Аккаунт Барановичи Экспресс: подключён ({_mask_phone(creds['phone'])})"
 
 
 @router.message(Command("list"))
@@ -414,19 +438,26 @@ async def cmd_list(message: Message):
         lines = [f"Все активные отслеживания ({len(watches)}):"]
         for uid, user_watches in by_user.items():
             name = await get_user_name(uid) or "без имени"
-            lines.append(f"\n👤 {name} (id {uid}):")
+            creds = await get_site_credentials(uid)
+            acc = f", аккаунт {_mask_phone(creds['phone'])}" if creds else ""
+            lines.append(f"\n👤 {name} (id {uid}{acc}):")
             for w in user_watches:
-                lines.append(_watch_line(w))
+                lines.append(_watch_line(w, creds_connected=creds is not None))
         await message.answer("\n".join(lines))
         return
 
+    creds = await get_site_credentials(message.from_user.id)
     watches = await get_user_watches(message.from_user.id)
     if not watches:
-        await message.answer("Нет активных отслеживаний.")
+        await message.answer(
+            f"Нет активных отслеживаний.\n\n{_account_line(creds)}")
         return
     lines = ["Активные отслеживания:\n"]
     for w in watches:
-        lines.append(f"{_watch_line(w)}\n  /stop {w['id']}")
+        lines.append(
+            f"{_watch_line(w, creds_connected=creds is not None)}\n"
+            f"  /stop {w['id']}")
+    lines.append(_account_line(creds))
     await message.answer("\n\n".join(lines))
 
 
