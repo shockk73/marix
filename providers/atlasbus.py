@@ -2,10 +2,12 @@ import asyncio
 
 import httpx
 from .base import (
+    DIRECTION_BARAN_MNSK,
     DIRECTION_BOBR_MG,
     DIRECTION_BOBR_MNSK,
     DIRECTION_MG_BOBR,
     DIRECTION_MG_MNSK,
+    DIRECTION_MNSK_BARAN,
     DIRECTION_MNSK_BOBR,
     DIRECTION_MNSK_MG,
     Trip,
@@ -23,6 +25,8 @@ class AtlasBusProvider:
         DIRECTION_BOBR_MG: ("c630468", "c625665"),
         DIRECTION_MNSK_BOBR: ("c625144", "c630468"),
         DIRECTION_BOBR_MNSK: ("c630468", "c625144"),
+        DIRECTION_MNSK_BARAN: ("c625144", "c630429"),
+        DIRECTION_BARAN_MNSK: ("c630429", "c625144"),
     }
     _url = "https://atlasbus.by/api/search"
     _max_attempts = 10

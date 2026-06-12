@@ -8,6 +8,8 @@ DIRECTION_MG_BOBR = "mg_bobr"
 DIRECTION_BOBR_MG = "bobr_mg"
 DIRECTION_MNSK_BOBR = "mnsk_bobr"
 DIRECTION_BOBR_MNSK = "bobr_mnsk"
+DIRECTION_MNSK_BARAN = "mnsk_baran"
+DIRECTION_BARAN_MNSK = "baran_mnsk"
 
 DIRECTION_LABELS = {
     DIRECTION_MG_MNSK: "Могилёв → Минск",
@@ -16,6 +18,8 @@ DIRECTION_LABELS = {
     DIRECTION_BOBR_MG: "Бобруйск → Могилёв",
     DIRECTION_MNSK_BOBR: "Минск → Бобруйск",
     DIRECTION_BOBR_MNSK: "Бобруйск → Минск",
+    DIRECTION_MNSK_BARAN: "Минск → Барановичи",
+    DIRECTION_BARAN_MNSK: "Барановичи → Минск",
 }
 
 

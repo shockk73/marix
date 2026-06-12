@@ -3,7 +3,7 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-11-markdown-routes-v1"
+LLM_SESSION_VERSION = "2026-06-12-baranovichi-v1"
 
 
 def build_system_prompt(now: datetime, user_name: str | None) -> str:
@@ -18,7 +18,7 @@ def build_system_prompt(now: datetime, user_name: str | None) -> str:
     tz_label = now.tzname() or "Europe/Minsk"
     parts = [
         "Ты — ассистент Telegram-бота, который отслеживает свободные места "
-        "в маршрутках между Могилёвом, Минском и Бобруйском.",
+        "в маршрутках между Могилёвом, Минском, Бобруйском и Барановичами.",
         "",
         f"Сегодня: {now.date().isoformat()}, сейчас {now.strftime('%H:%M')} ({tz_label}).",
     ]

@@ -5,10 +5,12 @@ from unittest.mock import AsyncMock
 
 from providers.base import (
     Trip,
+    DIRECTION_BARAN_MNSK,
     DIRECTION_BOBR_MG,
     DIRECTION_BOBR_MNSK,
     DIRECTION_MG_BOBR,
     DIRECTION_MG_MNSK,
+    DIRECTION_MNSK_BARAN,
     DIRECTION_MNSK_BOBR,
     DIRECTION_MNSK_MG,
     DIRECTION_LABELS,
@@ -18,6 +20,7 @@ from providers.mogilevminsk import MogilevMinskProvider
 from providers.avto_slava import AvtoSlavaProvider
 from providers.buspro import BusProProvider, MagnitPlusProvider
 from providers.atlasbus import AtlasBusProvider
+from providers.baranovichi_express import BaranovichiExpressProvider
 
 
 def test_trip_fields():
@@ -43,9 +46,13 @@ def test_direction_constants():
     assert DIRECTION_BOBR_MG == "bobr_mg"
     assert DIRECTION_MNSK_BOBR == "mnsk_bobr"
     assert DIRECTION_BOBR_MNSK == "bobr_mnsk"
+    assert DIRECTION_MNSK_BARAN == "mnsk_baran"
+    assert DIRECTION_BARAN_MNSK == "baran_mnsk"
     assert "Могилёв" in DIRECTION_LABELS[DIRECTION_MG_MNSK]
     assert "Минск" in DIRECTION_LABELS[DIRECTION_MNSK_MG]
     assert "Бобруйск" in DIRECTION_LABELS[DIRECTION_MG_BOBR]
+    assert "Барановичи" in DIRECTION_LABELS[DIRECTION_MNSK_BARAN]
+    assert "Барановичи" in DIRECTION_LABELS[DIRECTION_BARAN_MNSK]
 
 
 TIMETABLE_RESPONSE = {
@@ -337,6 +344,101 @@ def test_atlasbus_config():
     assert p.directions["bobr_mg"] == ("c630468", "c625665")
     assert p.directions["mnsk_bobr"] == ("c625144", "c630468")
     assert p.directions["bobr_mnsk"] == ("c630468", "c625144")
+    assert p.directions["mnsk_baran"] == ("c625144", "c630429")
+    assert p.directions["baran_mnsk"] == ("c630429", "c625144")
+
+
+BARAN_HTML = """
+<html><body>
+<article class="tickets-item">
+  <div class="tickets-item__way-mini">Минск — Барановичи</div>
+  <div class="tickets-way__point-time">7:00</div>
+  <div class="tickets-way__point-time">9:05</div>
+  <div>Свободно мест: 5</div>
+  <footer><b>20.00 руб.</b></footer>
+</article>
+<article class="tickets-item">
+  <div class="tickets-item__way-mini">Минск — Барановичи</div>
+  <div class="tickets-way__point-time">14:30</div>
+  <div class="tickets-way__point-time">16:35</div>
+  <div>Свободно мест: 0</div>
+  <footer><b>20.00 руб.</b></footer>
+</article>
+<article class="tickets-item">
+  <div class="tickets-item__way-mini">Минск — Барановичи</div>
+  <div class="tickets-way__point-time">18:00</div>
+  <div class="tickets-way__point-time">20:05</div>
+  <div>Свободно мест: 12</div>
+  <footer><b>25.50 руб.</b></footer>
+</article>
+</body></html>
+"""
+
+EMPTY_BARAN_HTML = "<html><body><div>Ничего не найдено</div></body></html>"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_baranovichi_parses_trips():
+    respx.get(url__startswith="https://tickets.baranovichi-express.by/tickets/search").mock(
+        return_value=httpx.Response(200, text=BARAN_HTML)
+    )
+    provider = BaranovichiExpressProvider()
+    async with httpx.AsyncClient() as client:
+        trips = await provider.get_trips(client, "2026-06-15", DIRECTION_MNSK_BARAN)
+
+    assert len(trips) == 3
+    assert trips[0].trip_id == "2026-06-15_07:00"
+    assert trips[0].departure_time == "07:00"  # нормализация «7:00»
+    assert trips[0].free_seats == 5
+    assert trips[0].price == 20.0
+    assert trips[0].route == "Минск — Барановичи"
+    assert trips[0].provider == "baranovichi_express"
+    assert trips[1].free_seats == 0
+    assert trips[2].departure_time == "18:00"
+    assert trips[2].price == 25.5
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_baranovichi_query_params():
+    route = respx.get(url__startswith="https://tickets.baranovichi-express.by/tickets/search").mock(
+        return_value=httpx.Response(200, text=BARAN_HTML)
+    )
+    provider = BaranovichiExpressProvider()
+    async with httpx.AsyncClient() as client:
+        await provider.get_trips(client, "2026-06-15", DIRECTION_MNSK_BARAN)
+        await provider.get_trips(client, "2026-06-15", DIRECTION_BARAN_MNSK)
+
+    p1 = route.calls[0].request.url.params
+    assert p1["pickup"] == "2"
+    assert p1["destination"] == "1"
+    assert p1["date_of_journey"] == "15.06.2026"
+    assert p1["seats_limit"] == "1"
+    p2 = route.calls[1].request.url.params
+    assert p2["pickup"] == "1"
+    assert p2["destination"] == "2"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_baranovichi_empty_page():
+    respx.get(url__startswith="https://tickets.baranovichi-express.by/tickets/search").mock(
+        return_value=httpx.Response(200, text=EMPTY_BARAN_HTML)
+    )
+    provider = BaranovichiExpressProvider()
+    async with httpx.AsyncClient() as client:
+        trips = await provider.get_trips(client, "2026-06-15", DIRECTION_BARAN_MNSK)
+    assert trips == []
+
+
+def test_baranovichi_config():
+    p = BaranovichiExpressProvider()
+    assert p.name == "baranovichi_express"
+    assert p.display_name == "Барановичи Экспресс"
+    assert p.directions["mnsk_baran"] == ("2", "1")
+    assert p.directions["baran_mnsk"] == ("1", "2")
+    assert "tickets.baranovichi-express.by" in p.url
 
 
 from providers import PROVIDERS
@@ -344,14 +446,15 @@ from providers import PROVIDERS
 
 def test_registry_has_all_providers():
     assert set(PROVIDERS.keys()) == {
-        "mogilevminsk", "avto_slava", "buspro", "magnitplus", "atlasbus"
+        "mogilevminsk", "avto_slava", "buspro", "magnitplus", "atlasbus",
+        "baranovichi_express",
     }
     for key, p in PROVIDERS.items():
         assert hasattr(p, "name")
         assert hasattr(p, "display_name")
         assert hasattr(p, "directions")
         assert hasattr(p, "get_trips")
-        if key != "magnitplus":
+        if key not in ("magnitplus", "baranovichi_express"):
             assert "mg_mnsk" in p.directions
             assert "mnsk_mg" in p.directions
 
@@ -366,3 +469,12 @@ def test_bobruisk_direction_support():
             assert {"mnsk_bobr", "bobr_mnsk"}.isdisjoint(provider.directions)
         else:
             assert set(provider.directions).isdisjoint(bobruisk_directions)
+
+
+def test_baranovichi_direction_support():
+    baran_directions = {"mnsk_baran", "baran_mnsk"}
+    for key, provider in PROVIDERS.items():
+        if key in ("atlasbus", "baranovichi_express"):
+            assert baran_directions <= set(provider.directions)
+        else:
+            assert set(provider.directions).isdisjoint(baran_directions)
