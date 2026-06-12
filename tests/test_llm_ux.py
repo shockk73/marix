@@ -353,7 +353,45 @@ async def test_empty_response_retried_then_sent(tmp_db, fake_bot, fake_scheduler
     await agent.run_turn(user_id=1, text="отмени все", user_name=None)
 
     assert client.chat_completion.call_count == 2
+    # ретрай пустого ответа идёт БЕЗ инструментов — только текст,
+    # иначе модель повторяет последний tool-вызов (дубль отчёта)
+    assert client.chat_completion.call_args_list[1].kwargs["tools"] == []
     assert fake_bot.sent[-1]["text"] == "Остановил все слежки."
+
+
+@pytest.mark.asyncio
+async def test_repeated_identical_tool_call_executed_once(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    calls = []
+
+    async def fake_dispatch(name, args, ctx):
+        calls.append(name)
+        return json.dumps({"sent": True})
+
+    monkeypatch.setattr("llm.agent.dispatch_tool", fake_dispatch)
+    report_call = {
+        "role": "assistant", "content": None,
+        "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "generate_sessions_report", "arguments": "{}"},
+        }],
+    }
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        report_call,
+        {**report_call, "tool_calls": [{**report_call["tool_calls"][0], "id": "c2"}]},
+        {"role": "assistant", "content": "Отчёт отправлен."},
+    ])
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="отчет", user_name=None)
+
+    # повторный идентичный вызов НЕ исполнен второй раз
+    assert calls == ["generate_sessions_report"]
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    tool_msgs = [m for m in msgs if m["role"] == "tool"]
+    assert len(tool_msgs) == 2
+    assert "repeated_call" in tool_msgs[1]["content"]
+    assert fake_bot.sent[-1]["text"] == "Отчёт отправлен."
 
 
 @pytest.mark.asyncio

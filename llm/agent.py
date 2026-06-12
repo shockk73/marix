@@ -534,6 +534,9 @@ class LLMAgent:
         role = await db_module.get_user_role(user_id) or "user"
         sent_texts: set[str] = set()  # дедуп в рамках хода: ретрай модели
         # после ошибки инструмента не должен дублировать текст юзеру
+        executed_calls: set[tuple[str, str]] = set()  # дедуп tool-вызовов
+        question_retry_used = False
+        empty_retry_used = False
         for _turn in range(OPENROUTER_MAX_TURNS):
             try:
                 rows = await db_module.get_recent_chat_messages(user_id, LLM_HISTORY_SIZE)
@@ -556,10 +559,12 @@ class LLMAgent:
                     messages=messages, tools=build_tools_for_role(role),
                 )
                 msg = _salvage_inline_tool_call(msg)
-                if (not (msg.get("tool_calls") or [])
+                if (not question_retry_used
+                        and not (msg.get("tool_calls") or [])
                         and "?" in (msg.get("content") or "")):
                     # Текстовый вопрос без кнопок запрещён (в любом месте
                     # сообщения) — один принудительный шанс переделать.
+                    question_retry_used = True
                     retry_messages = messages + [
                         {"role": "assistant", "content": msg.get("content") or ""},
                         {"role": "system", "content": (
@@ -575,10 +580,13 @@ class LLMAgent:
                         messages=retry_messages, tools=build_tools_for_role(role),
                     )
                     msg = _salvage_inline_tool_call(msg)
-                if (not (msg.get("tool_calls") or [])
+                if (not empty_retry_used
+                        and not (msg.get("tool_calls") or [])
                         and not (msg.get("content") or "").strip()):
-                    # Пустой ответ (ризонинг съел контент) — молчать нельзя,
-                    # одна принудительная попытка сформулировать ответ.
+                    # Пустой ответ (ризонинг съел контент) — молчать нельзя.
+                    # Ретрай БЕЗ инструментов: нужен только текст, иначе
+                    # модель повторяет последний tool-вызов (дубль отчёта).
+                    empty_retry_used = True
                     retry_messages = messages + [
                         {"role": "system", "content": (
                             "Твой ответ пуст. Напиши пользователю короткое "
@@ -587,7 +595,7 @@ class LLMAgent:
                     ]
                     await self._typing(user_id)
                     msg = await self._client.chat_completion(
-                        messages=retry_messages, tools=build_tools_for_role(role),
+                        messages=retry_messages, tools=[],
                     )
                     msg = _salvage_inline_tool_call(msg)
             except httpx.HTTPError as e:
@@ -650,8 +658,12 @@ class LLMAgent:
                     args = json.loads(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                call_key = (name, json.dumps(args, sort_keys=True,
+                                             ensure_ascii=False))
+                is_repeat = call_key in executed_calls
+
                 # подтверждаемые тулзы получают лейбл после «Да» (в resolve)
-                label = (None if name in CONFIRM_REQUIRED
+                label = (None if name in CONFIRM_REQUIRED or is_repeat
                          else _thinking_label(name, args))
                 if label:
                     try:
@@ -676,14 +688,26 @@ class LLMAgent:
                     ask_user_pending = True
                     break
                 else:
-                    try:
-                        result = await dispatch_tool(name, args, ctx)
-                    except Exception as e:
-                        logger.exception("Tool %s crashed: %s", name, e)
-                        result = json.dumps(
-                            {"error": f"Tool crashed: {type(e).__name__}: {e}"},
-                            ensure_ascii=False,
-                        )
+                    if is_repeat:
+                        # модель зациклилась на одинаковом вызове — не
+                        # исполняем повторно (иначе дубли отчётов/действий)
+                        result = json.dumps({
+                            "repeated_call": True,
+                            "note": ("Этот инструмент уже выполнен в этом "
+                                     "ходе с теми же аргументами. НЕ вызывай "
+                                     "его снова — ответь пользователю "
+                                     "текстом по уже полученному результату."),
+                        }, ensure_ascii=False)
+                    else:
+                        try:
+                            result = await dispatch_tool(name, args, ctx)
+                        except Exception as e:
+                            logger.exception("Tool %s crashed: %s", name, e)
+                            result = json.dumps(
+                                {"error": f"Tool crashed: {type(e).__name__}: {e}"},
+                                ensure_ascii=False,
+                            )
+                        executed_calls.add(call_key)
                     await db_module.insert_chat_message(
                         user_id, "tool", content=result, tool_call_id=tc_id,
                     )
