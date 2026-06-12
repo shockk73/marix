@@ -161,6 +161,118 @@ def test_prompt_mentions_show_screen_and_onboarding():
     assert "🔍 Следить за местами" in prompt
 
 
+def test_prompt_explains_goals_form_and_terminology():
+    prompt = build_system_prompt(now=NOW, user_name=None)
+    assert "ЦЕЛЬ" in prompt                      # концепция цели
+    assert "один вызов create_watch" in prompt.lower()
+    assert "ask_user_form" in prompt             # форма из нескольких вопросов
+    assert "Перебронировать" in prompt           # полуручное перебронирование
+    assert "не должен её знать" in prompt        # терминология скрыта от юзера
+
+
+def _form_tool_call(questions, call_id="f1"):
+    return {
+        "role": "assistant", "content": None,
+        "tool_calls": [{
+            "id": call_id, "type": "function",
+            "function": {"name": "ask_user_form",
+                         "arguments": json.dumps({"questions": questions},
+                                                 ensure_ascii=False)},
+        }],
+    }
+
+
+FORM_QUESTIONS = [
+    {"question": "Когда едем?", "options": ["завтра", "в субботу"]},
+    {"question": "Какое время?", "options": ["утро", "вечер"]},
+]
+
+
+@pytest.mark.asyncio
+async def test_ask_user_form_renders_and_collects_all_answers(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        _form_tool_call(FORM_QUESTIONS),
+        {"role": "assistant", "content": "Понял: завтра вечером."},
+    ])
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="следи", user_name=None)
+
+    form_msgs = [m for m in fake_bot.sent if m["reply_markup"] is not None]
+    assert len(form_msgs) == 2
+    assert "(1/2)" in form_msgs[0]["text"] and "Когда едем" in form_msgs[0]["text"]
+    assert "(2/2)" in form_msgs[1]["text"]
+    kb0 = form_msgs[0]["reply_markup"].inline_keyboard
+    assert kb0[0][0].callback_data == "aim:0:0"
+
+    # отвечаем на оба вопроса (второй — раньше первого, порядок не важен)
+    assert await agent.answer_form_option(1, 1, 1) == "recorded"
+    assert await agent.answer_form_option(1, 0, 0) == "done"
+
+    assert await db_module.get_pending_tool_call(1) is None
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    tool_msgs = [m for m in msgs if m["role"] == "tool"]
+    answers = json.loads(tool_msgs[-1]["content"])["answers"]
+    assert answers == {"Когда едем?": "завтра", "Какое время?": "вечер"}
+    assert fake_bot.sent[-1]["text"] == "Понял: завтра вечером."
+
+
+@pytest.mark.asyncio
+async def test_ask_user_form_duplicate_click_ignored(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value=_form_tool_call(FORM_QUESTIONS))
+    agent = _mk_agent(fake_bot, client)
+    await agent.run_turn(user_id=1, text="x", user_name=None)
+
+    assert await agent.answer_form_option(1, 0, 0) == "recorded"
+    assert await agent.answer_form_option(1, 0, 1) == "dup"
+    pending = await db_module.get_pending_tool_call(1)
+    payload = json.loads(pending["options_json"])
+    assert payload["answers"] == {"0": "завтра"}
+
+
+@pytest.mark.asyncio
+async def test_ask_user_form_invalid_returns_error_to_model(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        _form_tool_call([{"question": "Один?", "options": ["а", "б"]}]),
+        {"role": "assistant", "content": "переформулирую"},
+    ])
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="x", user_name=None)
+
+    assert await db_module.get_pending_tool_call(1) is None
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    tool_msgs = [m for m in msgs if m["role"] == "tool"]
+    assert "2..4 questions" in tool_msgs[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_new_message_cancels_form_with_partial_answers(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        _form_tool_call(FORM_QUESTIONS),
+        {"role": "assistant", "content": "ок, заново"},
+    ])
+    agent = _mk_agent(fake_bot, client)
+    await agent.run_turn(user_id=1, text="следи", user_name=None)
+    await agent.answer_form_option(1, 0, 0)
+
+    await agent.run_turn(user_id=1, text="забей, другой вопрос", user_name=None)
+
+    assert await db_module.get_pending_tool_call(1) is None
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    cancel = next(m for m in msgs if m["role"] == "tool"
+                  and "canceled" in (m["content"] or ""))
+    payload = json.loads(cancel["content"])
+    assert payload["canceled"] is True
+    assert payload["partial_answers"] == {"Когда едем?": "завтра"}
+    # клавиатуры обоих вопросов сняты (1 при ответе + 2 при отмене)
+    assert len(fake_bot.edited) >= 2
+
+
 @pytest.mark.asyncio
 async def test_agent_passes_state_to_prompt(tmp_db, fake_bot, fake_scheduler):
     await db_module.authorize_user(1, role="admin")

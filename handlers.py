@@ -523,6 +523,32 @@ async def on_ai_callback(cb: CallbackQuery):
     await _agent.continue_turn(user_id=user_id, selected_option=selected)
 
 
+@router.callback_query(F.data.startswith("aim:"))
+async def on_ai_form_answer(cb: CallbackQuery):
+    """Кнопка одного из вопросов формы ask_user_form."""
+    if _agent is None:
+        await cb.answer()
+        return
+    parts = cb.data.split(":")
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        await cb.answer()
+        return
+    outcome = await _agent.answer_form_option(
+        cb.from_user.id, int(parts[1]), int(parts[2]))
+    if outcome == "stale":
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.answer("Вопрос устарел.", show_alert=False)
+    elif outcome == "dup":
+        await cb.answer("На этот вопрос уже отвечено.")
+    elif outcome == "recorded":
+        await cb.answer("Принял ✔")
+    else:
+        await cb.answer("Все ответы получены ✔")
+
+
 @router.callback_query(F.data.startswith("aic:"))
 async def on_ai_confirm(cb: CallbackQuery):
     """Кнопки «Да/Нет» системного подтверждения state-changing инструмента."""
