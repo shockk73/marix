@@ -474,6 +474,8 @@ class LLMAgent:
         _raise_client_errors: bool = False,
     ) -> None:
         role = await db_module.get_user_role(user_id) or "user"
+        sent_texts: set[str] = set()  # дедуп в рамках хода: ретрай модели
+        # после ошибки инструмента не должен дублировать текст юзеру
         for _turn in range(OPENROUTER_MAX_TURNS):
             try:
                 rows = await db_module.get_recent_chat_messages(user_id, LLM_HISTORY_SIZE)
@@ -537,7 +539,8 @@ class LLMAgent:
 
             if not tool_calls:
                 await db_module.insert_chat_message(user_id, "assistant", content=content)
-                if content:
+                if content and content.strip() not in sent_texts:
+                    sent_texts.add(content.strip())
                     await self._send_markdown_message(user_id, content)
                 await db_module.prune_chat_messages(user_id, LLM_HISTORY_SIZE * 2)
                 return
@@ -547,7 +550,8 @@ class LLMAgent:
                 tool_calls=json.dumps(tool_calls),
             )
 
-            if content:
+            if content and content.strip() not in sent_texts:
+                sent_texts.add(content.strip())
                 try:
                     await self._send_markdown_message(user_id, content)
                 except Exception as e:

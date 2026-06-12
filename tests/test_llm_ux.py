@@ -342,6 +342,42 @@ async def test_plain_json_in_text_left_untouched(tmp_db, fake_bot, fake_schedule
 
 
 @pytest.mark.asyncio
+async def test_repeated_preface_not_sent_twice(tmp_db, fake_bot, fake_scheduler):
+    """Первый show_screen невалиден -> модель повторяет с тем же текстом:
+    юзер должен увидеть текст ОДИН раз + экран."""
+    preface = ("На 16 июня в вечернее время рейсов Барановичи → Минск сейчас "
+               "нет. Предлагаю поставить слежку: как только появятся места, "
+               "я сразу вам сообщу.")
+    bad_rows = [[{"label": f"r{i}", "value": f"v{i}"}] for i in range(9)]
+    good_rows = [[{"label": "🔔 Следить", "value": "watch"},
+                  {"label": "Не надо", "value": "no"}]]
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        {"role": "assistant", "content": preface,
+         "tool_calls": [{"id": "s1", "type": "function",
+                         "function": {"name": "show_screen",
+                                      "arguments": json.dumps(
+                                          {"text": "Следим?",
+                                           "buttons": bad_rows})}}]},
+        {"role": "assistant", "content": preface,
+         "tool_calls": [{"id": "s2", "type": "function",
+                         "function": {"name": "show_screen",
+                                      "arguments": json.dumps(
+                                          {"text": "Следим?",
+                                           "buttons": good_rows})}}]},
+    ])
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="хочу уехать", user_name=None)
+
+    preface_msgs = [m for m in fake_bot.sent if "Предлагаю поставить" in m["text"]]
+    assert len(preface_msgs) == 1                      # не дублируется
+    screen = next(m for m in fake_bot.sent if m["reply_markup"] is not None)
+    assert screen["text"] == "Следим?"
+    assert await db_module.get_pending_tool_call(1) is not None
+
+
+@pytest.mark.asyncio
 async def test_text_question_retried_into_buttons(tmp_db, fake_bot, fake_scheduler):
     client = AsyncMock()
     client.chat_completion = AsyncMock(side_effect=[
