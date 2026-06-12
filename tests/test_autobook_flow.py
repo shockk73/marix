@@ -657,7 +657,7 @@ async def test_list_all_watches_admin_only(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
-async def test_update_watch_toggles_autobook_and_restarts(tmp_db, fake_booker, monkeypatch):
+async def test_update_trip_toggles_autobook_on_baran_watch_only(tmp_db, fake_booker, monkeypatch):
     started, cancelled = [], []
 
     async def rec_start(w):
@@ -670,71 +670,90 @@ async def test_update_watch_toggles_autobook_and_restarts(tmp_db, fake_booker, m
     monkeypatch.setattr(scheduler, "cancel_watch", rec_cancel)
 
     await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
-    watch = await _mk_watch_row(autobook="off", goal_id="g30")
+    baran = await _mk_watch_row(autobook="off", goal_id="g30")
+    atlas = await _mk_watch_row(provider="atlasbus", autobook="off",
+                                goal_id="g30")
     ctx = ToolContext(user_id=1)
 
-    # off -> auto (с живой проверкой кредов)
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": watch["id"], "autobook": "auto"}, ctx))
+    # off -> auto: применяется ТОЛЬКО к барановичской слежке поездки
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g30", "autobook": "auto"}, ctx))
     assert out["updated"]["autobook"] == "auto"
-    assert (await db_module.get_watch(watch["id"]))["autobook"] == "auto"
+    assert sorted(out["updated"]["watch_ids"]) == [baran["id"]]
+    assert (await db_module.get_watch(baran["id"]))["autobook"] == "auto"
+    assert (await db_module.get_watch(atlas["id"]))["autobook"] == "off"
     assert fake_booker.verify_calls == ["+375 (29) 177-62-96"]
-    assert cancelled == [watch["id"]] and started == [watch["id"]]
+    assert cancelled == [baran["id"]] and started == [baran["id"]]
 
     # auto -> off (без проверки кредов)
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": watch["id"], "autobook": "off"}, ctx))
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g30", "autobook": "off"}, ctx))
     assert out["updated"]["autobook"] == "off"
     assert len(fake_booker.verify_calls) == 1
 
     # невалидные креды при включении
     fake_booker.verify_error = InvalidCredentials("bad")
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": watch["id"], "autobook": "auto"}, ctx))
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g30", "autobook": "auto"}, ctx))
     assert "error" in out
     fake_booker.verify_error = None
 
-    # чужая/несуществующая слежка
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": 9999, "autobook": "off"}, ctx))
+    # несуществующая поездка
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "nope", "autobook": "off"}, ctx))
+    assert "error" in out
+
+    # поездка без барановичей — автобронь переключать не на чем
+    await _mk_watch_row(provider="atlasbus", autobook="off", goal_id="g30x")
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g30x", "autobook": "auto"}, ctx))
     assert "error" in out
 
 
 @pytest.mark.asyncio
-async def test_update_watch_pref_and_stops(tmp_db, fake_scheduler, fake_booker):
-    watch = await _mk_watch_row(autobook="off", goal_id="g31",
+async def test_update_trip_window_applies_to_all_watches(tmp_db, fake_scheduler, fake_booker):
+    baran = await _mk_watch_row(autobook="off", goal_id="g31",
+                                time_from="10:00", time_to="20:00")
+    atlas = await _mk_watch_row(provider="atlasbus", autobook="off",
+                                goal_id="g31",
                                 time_from="10:00", time_to="20:00")
     ctx = ToolContext(user_id=1)
 
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": watch["id"],
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g31",
         "pref_time_from": "14:00", "pref_time_to": "15:00",
         "pickup_stop": "ДРУГАЯ"}, ctx))
     assert out["updated"]["pref_time_from"] == "14:00"
     assert out["updated"]["pickup_stop"] == "ДРУГАЯ"
+    # pref — на всех слежках, остановки — только на барановичах
+    assert (await db_module.get_watch(atlas["id"]))["pref_time_from"] == "14:00"
+    assert (await db_module.get_watch(atlas["id"]))["pickup_stop"] is None
+    assert (await db_module.get_watch(baran["id"]))["pickup_stop"] == "ДРУГАЯ"
 
     # pref вне окна
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": watch["id"],
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g31",
         "pref_time_from": "08:00", "pref_time_to": "09:00"}, ctx))
     assert "error" in out
 
     # очистка пустыми строками
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": watch["id"],
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g31",
         "pref_time_from": "", "pref_time_to": "",
         "pickup_stop": ""}, ctx))
     assert out["updated"]["pref_time_from"] is None
     assert out["updated"]["pickup_stop"] is None
 
-    # сужение окна, при котором pref вылетел бы — pref уже очищен, ок
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": watch["id"], "time_from": "12:00", "time_to": "16:00"}, ctx))
+    # смена окна применяется ко всем слежкам поездки
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g31", "time_from": "12:00", "time_to": "16:00"}, ctx))
     assert out["updated"]["time_from"] == "12:00"
+    assert (await db_module.get_watch(atlas["id"]))["time_from"] == "12:00"
+    assert (await db_module.get_watch(baran["id"]))["time_to"] == "16:00"
 
     # пустой апдейт
-    out = json.loads(await dispatch_tool("update_watch", {
-        "watch_id": watch["id"]}, ctx))
+    out = json.loads(await dispatch_tool("update_trip", {
+        "goal_id": "g31"}, ctx))
     assert "error" in out
 
 

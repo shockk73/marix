@@ -124,23 +124,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "update_watch",
+            "name": "update_trip",
             "description": (
-                "Изменить активную слежку без пересоздания: режим автоброни "
-                "(off/confirm/auto), приоритетное окно, остановки, окно "
-                "времени, дату, интервал. Слежка перезапустится с новыми "
+                "Изменить ПОЕЗДКУ целиком (все её слежки) без пересоздания: "
+                "режим автоброни (off/confirm/auto — применяется к слежке "
+                "Барановичи Экспресс этой поездки), приоритетное окно, "
+                "остановки, окно времени, дату, интервал. goal_id возьми из "
+                "памяти/list_watches. Слежки перезапустятся с новыми "
                 "параметрами. Пустая строка в pref_time_from/pickup_stop/"
                 "dropoff_stop очищает поле."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "watch_id": {"type": "integer"},
+                    "goal_id": {"type": "string",
+                                "description": "Цель (поездка) из памяти"},
                     "autobook": {
                         "type": "string",
                         "enum": ["off", "confirm", "auto"],
-                        "description": ("Переключить автобронь (только слежки "
-                                        "baranovichi_express, нужен аккаунт)."),
+                        "description": ("Переключить автобронь (нужен "
+                                        "Барановичи Экспресс в поездке и "
+                                        "аккаунт)."),
                     },
                     "pref_time_from": {"type": "string",
                                        "description": "HH:MM или \"\" для очистки"},
@@ -154,7 +158,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "date": {"type": "string", "description": "YYYY-MM-DD"},
                     "interval_sec": {"type": "integer", "description": "Минимум 60"},
                 },
-                "required": ["watch_id"],
+                "required": ["goal_id"],
             },
         },
     },
@@ -790,23 +794,28 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
     }, ensure_ascii=False)
 
 
-async def _tool_update_watch(args: dict, ctx: ToolContext) -> str:
-    watch_id = args.get("watch_id")
-    if not isinstance(watch_id, int):
-        return _err("watch_id must be integer")
-    w = await db_module.get_watch(watch_id)
-    if w is None or w["user_id"] != ctx.user_id or not w["active"]:
-        return _err(f"активная слежка #{watch_id} не найдена")
+async def _tool_update_trip(args: dict, ctx: ToolContext) -> str:
+    goal_id = args.get("goal_id")
+    if not isinstance(goal_id, str) or not goal_id:
+        return _err("goal_id must be a non-empty string")
+    watches = await db_module.get_goal_watches(ctx.user_id, goal_id)
+    if not watches:
+        return _err(f"поездка {goal_id} не найдена среди активных")
+    baran = next((w for w in watches
+                  if w["provider"] == "baranovichi_express"), None)
+    ref = watches[0]
 
-    fields: dict = {}
+    common_fields: dict = {}   # для всех слежек поездки
+    baran_fields: dict = {}    # только для слежки Барановичей
 
     if "autobook" in args:
         mode = args.get("autobook") or "off"
         if mode not in ("off", "confirm", "auto"):
             return _err("autobook must be off|confirm|auto")
+        if baran is None:
+            return _err("в этой поездке нет Барановичи Экспресс — "
+                        "автобронь переключать не на чем")
         if mode != "off":
-            if w["provider"] != "baranovichi_express":
-                return _err("автобронь доступна только слежкам baranovichi_express")
             creds = await db_module.get_site_credentials(ctx.user_id)
             if creds is None:
                 return _err("Сначала подключи аккаунт сайта "
@@ -819,32 +828,31 @@ async def _tool_update_watch(args: dict, ctx: ToolContext) -> str:
             except Exception as e:
                 return _err(f"Не удалось проверить аккаунт — сайт недоступен "
                             f"({type(e).__name__}), попробуй позже")
-        fields["autobook"] = mode
+        baran_fields["autobook"] = mode
 
-    new_date = w["date"]
     if "date" in args:
         new_date = args.get("date") or ""
         if not _valid_date(new_date):
             return _err("date must be YYYY-MM-DD")
-        fields["date"] = new_date
+        common_fields["date"] = new_date
 
-    tf = w["time_from"]
-    tt = w["time_to"]
+    tf = ref["time_from"]
+    tt = ref["time_to"]
     if "time_from" in args:
         tf = args.get("time_from") or ""
         if not _valid_time(tf):
             return _err("time_from must be HH:MM")
-        fields["time_from"] = tf
+        common_fields["time_from"] = tf
     if "time_to" in args:
         tt = args.get("time_to") or ""
         if not _valid_time(tt):
             return _err("time_to must be HH:MM")
-        fields["time_to"] = tt
+        common_fields["time_to"] = tt
     if tf > tt:
         return _err("time_from must be <= time_to")
 
-    pref_from = w.get("pref_time_from")
-    pref_to = w.get("pref_time_to")
+    pref_from = ref.get("pref_time_from")
+    pref_to = ref.get("pref_time_to")
     if "pref_time_from" in args or "pref_time_to" in args:
         pref_from = args.get("pref_time_from", pref_from)
         pref_to = args.get("pref_time_to", pref_to)
@@ -856,44 +864,59 @@ async def _tool_update_watch(args: dict, ctx: ToolContext) -> str:
         else:
             if not _valid_time(pref_from) or not _valid_time(pref_to):
                 return _err("pref_time_from/pref_time_to must be HH:MM")
-        fields["pref_time_from"] = pref_from
-        fields["pref_time_to"] = pref_to
+        common_fields["pref_time_from"] = pref_from
+        common_fields["pref_time_to"] = pref_to
     if pref_from and not (tf <= pref_from <= pref_to <= tt):
         return _err("приоритетное окно должно лежать внутри основного окна")
 
     for stop_key in ("pickup_stop", "dropoff_stop"):
         if stop_key in args:
             value = args.get(stop_key) or None
-            if value and w["provider"] != "baranovichi_express":
-                return _err("остановки имеют смысл только для baranovichi_express")
-            fields[stop_key] = value
+            if value and baran is None:
+                return _err("остановки имеют смысл только для поездок "
+                            "с Барановичи Экспресс")
+            baran_fields[stop_key] = value
 
     if "interval_sec" in args:
         interval = args.get("interval_sec")
         if not isinstance(interval, int) or interval < 60:
             return _err("interval_sec must be integer >= 60")
-        fields["interval_sec"] = interval
+        common_fields["interval_sec"] = interval
 
-    if not fields:
+    if not common_fields and not baran_fields:
         return _err("нечего менять — передай хотя бы одно поле")
 
-    await db_module.update_watch_fields(watch_id, fields)
-    fresh = await db_module.get_watch(watch_id)
-    # перезапуск поллера с новыми параметрами
-    await scheduler.cancel_watch(watch_id)
-    await scheduler.start_watch(fresh)
+    updated_ids = []
+    for w in watches:
+        fields = dict(common_fields)
+        if baran is not None and w["id"] == baran["id"]:
+            fields.update(baran_fields)
+        if not fields:
+            continue
+        await db_module.update_watch_fields(w["id"], fields)
+        fresh = await db_module.get_watch(w["id"])
+        # перезапуск поллера с новыми параметрами
+        await scheduler.cancel_watch(w["id"])
+        await scheduler.start_watch(fresh)
+        updated_ids.append(w["id"])
 
+    fresh_watches = await db_module.get_goal_watches(ctx.user_id, goal_id)
+    snapshot = next((w for w in fresh_watches
+                     if w["provider"] == "baranovichi_express"),
+                    fresh_watches[0])
     return json.dumps({"updated": {
-        "id": fresh["id"],
-        "autobook": fresh["autobook"],
-        "date": fresh["date"],
-        "time_from": fresh["time_from"],
-        "time_to": fresh["time_to"],
-        "pref_time_from": fresh["pref_time_from"],
-        "pref_time_to": fresh["pref_time_to"],
-        "pickup_stop": fresh["pickup_stop"],
-        "dropoff_stop": fresh["dropoff_stop"],
-        "interval_sec": fresh["interval_sec"],
+        "goal_id": goal_id,
+        "watch_ids": updated_ids,
+        "providers": [w["provider"] for w in fresh_watches],
+        "autobook": snapshot.get("autobook") or "off",
+        "date": snapshot["date"],
+        "time_from": snapshot["time_from"],
+        "time_to": snapshot["time_to"],
+        "pref_time_from": snapshot.get("pref_time_from"),
+        "pref_time_to": snapshot.get("pref_time_to"),
+        "pickup_stop": snapshot.get("pickup_stop"),
+        "dropoff_stop": snapshot.get("dropoff_stop"),
+        "interval_sec": snapshot["interval_sec"],
     }}, ensure_ascii=False)
 
 
@@ -1199,7 +1222,7 @@ async def _tool_generate_sessions_report(args: dict, ctx: ToolContext) -> str:
 _HANDLERS = {
     "list_watches": _tool_list_watches,
     "create_watch": _tool_create_watch,
-    "update_watch": _tool_update_watch,
+    "update_trip": _tool_update_trip,
     "stop_watch": _tool_stop_watch,
     "stop_all_watches": _tool_stop_all_watches,
     "check_trips_now": _tool_check_trips_now,
