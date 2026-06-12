@@ -774,7 +774,14 @@ async def _tool_check_trips_now(args: dict, ctx: ToolContext) -> str:
             return _err(f"Provider call failed: {e}")
 
     filtered = [t for t in trips if tf <= t.departure_time <= tt]
+    bookable = provider_key == "baranovichi_express"
     return json.dumps({
+        "provider": provider_key,
+        "provider_display": provider.display_name,
+        "bookable": bookable,
+        "note": (None if bookable
+                 else "Этот перевозчик НЕ поддерживает бронь — не предлагай "
+                      "забронировать его рейсы, только уведомления/слежку."),
         "trips": [{
             "trip_id": t.trip_id, "departure_time": t.departure_time,
             "free_seats": t.free_seats, "price": t.price, "currency": t.currency,

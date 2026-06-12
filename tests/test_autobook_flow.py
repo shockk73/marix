@@ -508,6 +508,30 @@ async def test_create_watch_joins_existing_goal(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
+async def test_check_trips_now_marks_bookable(tmp_db, baran_provider, monkeypatch):
+    from tests.test_stability import FakeProvider as FP
+    atlas_fake = FP()
+    atlas_fake.directions = {"mnsk_baran": ("1", "2")}
+    atlas_fake.trips = [_trip("a1", "13:30")]
+    monkeypatch.setitem(PROVIDERS, "atlasbus", atlas_fake)
+    baran_provider.directions = {"mnsk_baran": ("2", "1")}
+    baran_provider.trips = [_trip("b1", "14:00")]
+    ctx = ToolContext(user_id=1)
+    args = {"direction": "mnsk_baran", "date": "2099-06-14",
+            "time_from": "00:00", "time_to": "23:59"}
+
+    atlas_out = json.loads(await dispatch_tool(
+        "check_trips_now", {**args, "provider": "atlasbus"}, ctx))
+    baran_out = json.loads(await dispatch_tool(
+        "check_trips_now", {**args, "provider": "baranovichi_express"}, ctx))
+
+    assert atlas_out["bookable"] is False
+    assert "не предлагай" in atlas_out["note"].lower()
+    assert baran_out["bookable"] is True
+    assert baran_out["note"] is None
+
+
+@pytest.mark.asyncio
 async def test_list_all_watches_admin_only(tmp_db, fake_scheduler):
     await db_module.set_user_name(1, "Дима")
     await db_module.set_user_name(2, "Маша")
