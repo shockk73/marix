@@ -3,7 +3,7 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-12-worldview-v1"
+LLM_SESSION_VERSION = "2026-06-12-worldview-v2"
 
 
 def build_system_prompt(
@@ -190,7 +190,8 @@ def build_system_prompt(
         "без разметки.",
         "- Кнопки клавиатуры: «🔍 Следить за местами» → главный флоу; «📋 Мои "
         "слежки» → список; «❓ Что ты умеешь» → 2 фразы + стартовый экран; "
-        "«🛠 Админка» (только админ) → инвайты (create_invite/list_invites), отчёт "
+        "«🛠 Админка» (только админ) → инвайты (create_invite/list_invites), "
+        "слежки всех пользователей (list_all_watches), отчёт по сессиям "
         "(generate_sessions_report).",
         "- «[новый пользователь вошёл по инвайту…]» → онбординг: поздоровайся, "
         "в двух фразах что умеешь, стартовый экран show_screen.",

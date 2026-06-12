@@ -479,6 +479,17 @@ ADMIN_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "list_all_watches",
+            "description": (
+                "Все активные слежки ВСЕХ пользователей со статусами "
+                "выполнения — полный отчёт. Только для админа."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_sessions_report",
             "description": (
                 "Сгенерировать HTML-отчёт по всем пользователям (последние "
@@ -957,6 +968,32 @@ async def _tool_get_baranovichi_stops(args: dict, ctx: ToolContext) -> str:
     return json.dumps(stops, ensure_ascii=False)
 
 
+async def _tool_list_all_watches(args: dict, ctx: ToolContext) -> str:
+    if ctx.role != "admin":
+        return _err("list_all_watches доступен только админу")
+    watches = await db_module.get_active_watches()
+    statuses = await db_module.get_watch_statuses([w["id"] for w in watches])
+    out = []
+    for w in watches:
+        out.append({
+            "id": w["id"],
+            "user_id": w["user_id"],
+            "user_name": await db_module.get_user_name(w["user_id"]),
+            "provider": w["provider"],
+            "provider_display": PROVIDERS[w["provider"]].display_name,
+            "direction": w["direction"],
+            "direction_label": DIRECTION_LABELS[w["direction"]],
+            "date": w["date"],
+            "time_from": w["time_from"],
+            "time_to": w["time_to"],
+            "interval_sec": w["interval_sec"],
+            "autobook": w.get("autobook") or "off",
+            "goal_id": w.get("goal_id"),
+            "execution": _watch_execution_payload(statuses.get(w["id"])),
+        })
+    return json.dumps({"watches": out}, ensure_ascii=False)
+
+
 async def _tool_generate_sessions_report(args: dict, ctx: ToolContext) -> str:
     if ctx.role != "admin":
         return _err("generate_sessions_report доступен только админу")
@@ -985,6 +1022,7 @@ _HANDLERS = {
     "list_self_callbacks": _tool_list_self_callbacks,
     "create_invite": _tool_create_invite,
     "list_invites": _tool_list_invites,
+    "list_all_watches": _tool_list_all_watches,
     "generate_sessions_report": _tool_generate_sessions_report,
     "save_baranovichi_credentials": _tool_save_baranovichi_credentials,
     "get_credentials_status": _tool_get_credentials_status,

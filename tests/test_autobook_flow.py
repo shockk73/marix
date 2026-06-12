@@ -508,6 +508,38 @@ async def test_create_watch_joins_existing_goal(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
+async def test_list_all_watches_admin_only(tmp_db, fake_scheduler):
+    await db_module.set_user_name(1, "Дима")
+    await db_module.set_user_name(2, "Маша")
+    await db_module.create_watch(
+        user_id=1, provider="atlasbus", direction="mnsk_baran",
+        date="2099-06-14", time_from="10:00", time_to="20:00", interval_sec=60)
+    await db_module.create_watch(
+        user_id=2, provider="baranovichi_express", direction="baran_mnsk",
+        date="2099-06-15", time_from="08:00", time_to="12:00", interval_sec=60,
+        autobook="auto", goal_id="g77")
+
+    out = json.loads(await dispatch_tool(
+        "list_all_watches", {}, ToolContext(user_id=1, role="user")))
+    assert "error" in out
+
+    out = json.loads(await dispatch_tool(
+        "list_all_watches", {}, ToolContext(user_id=1, role="admin")))
+    assert len(out["watches"]) == 2
+    by_user = {w["user_id"]: w for w in out["watches"]}
+    assert by_user[1]["user_name"] == "Дима"
+    assert by_user[2]["user_name"] == "Маша"
+    assert by_user[2]["autobook"] == "auto"
+    assert "execution" in by_user[1]
+
+    from llm.tools import build_tools_for_role
+    assert "list_all_watches" in {
+        t["function"]["name"] for t in build_tools_for_role("admin")}
+    assert "list_all_watches" not in {
+        t["function"]["name"] for t in build_tools_for_role("user")}
+
+
+@pytest.mark.asyncio
 async def test_create_watch_default_interval_60(tmp_db, fake_scheduler):
     ctx = ToolContext(user_id=1)
     out = json.loads(await dispatch_tool("create_watch", {

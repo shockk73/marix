@@ -15,9 +15,10 @@ from datetime import datetime
 from config import AUTH_CODE
 from db import (
     MAX_AUTH_ATTEMPTS,
-    authorize_user, create_watch, get_active_goal_booking, get_user_role,
-    get_user_watches, get_watch, increment_failed_attempts, is_authorized,
-    is_banned, set_user_role, stop_watch as db_stop_watch, use_invite,
+    authorize_user, create_watch, get_active_goal_booking, get_active_watches,
+    get_user_name, get_user_role, get_user_watches, get_watch,
+    increment_failed_attempts, is_authorized, is_banned, set_user_role,
+    stop_watch as db_stop_watch, use_invite,
 )
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
@@ -368,21 +369,46 @@ async def on_interval(message: Message, state: FSMContext):
     await message.answer("\n".join(lines))
 
 
+def _watch_line(w: dict) -> str:
+    p = PROVIDERS[w["provider"]]
+    dir_label = DIRECTION_LABELS[w["direction"]]
+    extra = ""
+    if (w.get("autobook") or "off") != "off":
+        extra = f", автобронь: {w['autobook']}"
+    return (
+        f"#{w['id']} {p.display_name} | {dir_label}\n"
+        f"  {w['date']}, {w['time_from']}–{w['time_to']}, "
+        f"каждые {w['interval_sec']}с{extra}"
+    )
+
+
 @router.message(Command("list"))
 async def cmd_list(message: Message):
+    # админ видит полный отчёт по всем пользователям
+    if await get_user_role(message.from_user.id) == "admin":
+        watches = await get_active_watches()
+        if not watches:
+            await message.answer("Активных отслеживаний нет ни у кого.")
+            return
+        by_user: dict[int, list[dict]] = {}
+        for w in watches:
+            by_user.setdefault(w["user_id"], []).append(w)
+        lines = [f"Все активные отслеживания ({len(watches)}):"]
+        for uid, user_watches in by_user.items():
+            name = await get_user_name(uid) or "без имени"
+            lines.append(f"\n👤 {name} (id {uid}):")
+            for w in user_watches:
+                lines.append(_watch_line(w))
+        await message.answer("\n".join(lines))
+        return
+
     watches = await get_user_watches(message.from_user.id)
     if not watches:
         await message.answer("Нет активных отслеживаний.")
         return
     lines = ["Активные отслеживания:\n"]
     for w in watches:
-        p = PROVIDERS[w["provider"]]
-        dir_label = DIRECTION_LABELS[w["direction"]]
-        lines.append(
-            f"#{w['id']} {p.display_name} | {dir_label}\n"
-            f"  {w['date']}, {w['time_from']}–{w['time_to']}, каждые {w['interval_sec']}с\n"
-            f"  /stop {w['id']}"
-        )
+        lines.append(f"{_watch_line(w)}\n  /stop {w['id']}")
     await message.answer("\n\n".join(lines))
 
 
