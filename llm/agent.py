@@ -18,7 +18,7 @@ import db as db_module
 from llm.client import OpenRouterClient
 from llm.history import to_openai_messages
 from llm.prompt import build_system_prompt
-from llm.tools import TOOL_SCHEMAS, ToolContext, dispatch_tool
+from llm.tools import ToolContext, build_tools_for_role, dispatch_tool
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,8 @@ _TOOL_THINKING_LABELS = {
     "set_atlas_proxy_target": "Меняю Atlas proxy target…",
     "schedule_self_callback": "Планирую callback…",
     "list_self_callbacks": "Смотрю отложенные callback-и…",
+    "create_invite": "Создаю инвайт…",
+    "list_invites": "Смотрю инвайты…",
 }
 
 
@@ -49,10 +51,12 @@ class LLMAgent:
         bot: Any,
         client: OpenRouterClient,
         now_provider: Callable[[], datetime] = _default_now,
+        bot_username: str | None = None,
     ) -> None:
         self._bot = bot
         self._client = client
         self._now = now_provider
+        self._bot_username = bot_username
         self._locks: dict[int, asyncio.Lock] = {}
         self._callback_tasks: dict[int, asyncio.Task] = {}
 
@@ -317,6 +321,7 @@ class LLMAgent:
         _override_last_user: dict[str, Any] | None = None,
         _raise_client_errors: bool = False,
     ) -> None:
+        role = await db_module.get_user_role(user_id) or "user"
         for _turn in range(OPENROUTER_MAX_TURNS):
             try:
                 rows = await db_module.get_recent_chat_messages(user_id, LLM_HISTORY_SIZE)
@@ -333,7 +338,7 @@ class LLMAgent:
                             break
                     _override_last_user = None
                 msg = await self._client.chat_completion(
-                    messages=messages, tools=TOOL_SCHEMAS,
+                    messages=messages, tools=build_tools_for_role(role),
                 )
             except httpx.HTTPError as e:
                 if (
@@ -378,6 +383,8 @@ class LLMAgent:
             ctx = ToolContext(
                 user_id=user_id,
                 schedule_self_callback=self.schedule_self_callback,
+                role=role,
+                bot_username=self._bot_username,
             )
             ask_user_pending = False
             for tc in tool_calls:

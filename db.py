@@ -1,4 +1,5 @@
 import json
+import secrets
 import time
 import aiosqlite
 from datetime import datetime
@@ -109,9 +110,27 @@ CREATE TABLE IF NOT EXISTS agent_callbacks (
 )
 """
 
+_CREATE_INVITES = """
+CREATE TABLE IF NOT EXISTS invites (
+    token      TEXT PRIMARY KEY,
+    created_by INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    used_by    INTEGER,
+    used_at    TEXT
+)
+"""
+
 MAX_AUTH_ATTEMPTS = 3
 LLM_SESSION_VERSION_KEY = "llm_session_version"
 ATLAS_PROXY_TARGET_KEY = "atlas_proxy_target"
+
+
+async def _ensure_column(conn, table: str, ddl_column: str) -> None:
+    column = ddl_column.split()[0]
+    cur = await conn.execute(f"PRAGMA table_info({table})")
+    existing = [row[1] for row in await cur.fetchall()]
+    if column not in existing:
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl_column}")
 
 
 async def init_db():
@@ -126,6 +145,9 @@ async def init_db():
         await conn.execute(_CREATE_APP_STATE)
         await conn.execute(_CREATE_WATCH_STATUSES)
         await conn.execute(_CREATE_AGENT_CALLBACKS)
+        await conn.execute(_CREATE_INVITES)
+        await _ensure_column(conn, "authorized_users",
+                             "role TEXT NOT NULL DEFAULT 'user'")
         await conn.commit()
 
 
@@ -138,13 +160,71 @@ async def is_authorized(user_id: int) -> bool:
         return await cur.fetchone() is not None
 
 
-async def authorize_user(user_id: int) -> None:
+async def authorize_user(user_id: int, role: str = "user") -> None:
+    """Авторизует юзера. Повторный вызов может поднять роль до admin,
+    но никогда не понижает обратно."""
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
-            "INSERT OR IGNORE INTO authorized_users (user_id, authorized_at) VALUES (?, ?)",
-            (user_id, datetime.now().isoformat()),
+            """INSERT INTO authorized_users (user_id, authorized_at, role)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET role = excluded.role
+               WHERE excluded.role = 'admin'""",
+            (user_id, datetime.now().isoformat(), role),
         )
         await conn.commit()
+
+
+async def get_user_role(user_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT role FROM authorized_users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def set_user_role(user_id: int, role: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE authorized_users SET role = ? WHERE user_id = ?",
+            (role, user_id),
+        )
+        await conn.commit()
+
+
+async def create_invite(created_by: int) -> str:
+    token = secrets.token_urlsafe(12)
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT INTO invites (token, created_by, created_at) VALUES (?, ?, ?)",
+            (token, created_by, datetime.now().isoformat()),
+        )
+        await conn.commit()
+    return token
+
+
+async def use_invite(token: str, user_id: int) -> bool:
+    """Атомарно помечает токен использованным и авторизует юзера."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """UPDATE invites SET used_by = ?, used_at = ?
+               WHERE token = ? AND used_by IS NULL""",
+            (user_id, datetime.now().isoformat(), token),
+        )
+        await conn.commit()
+        if cur.rowcount == 0:
+            return False
+    await authorize_user(user_id)
+    return True
+
+
+async def list_invites() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM invites ORDER BY created_at DESC")
+        return [dict(r) for r in await cur.fetchall()]
 
 
 async def get_failed_attempts(user_id: int) -> int:

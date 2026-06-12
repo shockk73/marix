@@ -36,7 +36,8 @@ async def main() -> None:
         model=OPENROUTER_MODEL,
         base_url=OPENROUTER_BASE_URL,
     )
-    agent = LLMAgent(bot=bot, client=llm_client)
+    me = await bot.get_me()
+    agent = LLMAgent(bot=bot, client=llm_client, bot_username=me.username)
     set_agent(agent)
     await agent.restore_scheduled_callbacks()
 

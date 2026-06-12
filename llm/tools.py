@@ -20,6 +20,8 @@ from providers.base import DIRECTION_LABELS
 class ToolContext:
     user_id: int
     schedule_self_callback: Callable[[int, float, str], Awaitable[int]] | None = None
+    role: str = "user"
+    bot_username: str | None = None
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -209,6 +211,38 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+ADMIN_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "create_invite",
+            "description": (
+                "Создать одноразовую инвайт-ссылку для нового пользователя. "
+                "Только для админа."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_invites",
+            "description": (
+                "Показать все инвайты и их статус (ожидает / кем использован). "
+                "Только для админа."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+]
+
+
+def build_tools_for_role(role: str | None) -> list[dict[str, Any]]:
+    if role == "admin":
+        return TOOL_SCHEMAS + ADMIN_TOOL_SCHEMAS
+    return TOOL_SCHEMAS
 
 
 def _err(msg: str) -> str:
@@ -468,6 +502,22 @@ async def _tool_list_self_callbacks(args: dict, ctx: ToolContext) -> str:
     }, ensure_ascii=False)
 
 
+async def _tool_create_invite(args: dict, ctx: ToolContext) -> str:
+    if ctx.role != "admin":
+        return _err("create_invite доступен только админу")
+    token = await db_module.create_invite(ctx.user_id)
+    link = (f"https://t.me/{ctx.bot_username}?start={token}"
+            if ctx.bot_username else None)
+    return json.dumps({"token": token, "link": link}, ensure_ascii=False)
+
+
+async def _tool_list_invites(args: dict, ctx: ToolContext) -> str:
+    if ctx.role != "admin":
+        return _err("list_invites доступен только админу")
+    return json.dumps({"invites": await db_module.list_invites()},
+                      ensure_ascii=False)
+
+
 _HANDLERS = {
     "list_watches": _tool_list_watches,
     "create_watch": _tool_create_watch,
@@ -478,6 +528,8 @@ _HANDLERS = {
     "set_atlas_proxy_target": _tool_set_atlas_proxy_target,
     "schedule_self_callback": _tool_schedule_self_callback,
     "list_self_callbacks": _tool_list_self_callbacks,
+    "create_invite": _tool_create_invite,
+    "list_invites": _tool_list_invites,
 }
 
 

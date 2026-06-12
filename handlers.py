@@ -14,7 +14,8 @@ from config import AUTH_CODE
 from db import (
     MAX_AUTH_ATTEMPTS,
     authorize_user, create_watch, get_user_watches, increment_failed_attempts,
-    is_authorized, is_banned, stop_watch as db_stop_watch,
+    is_authorized, is_banned, set_user_role, stop_watch as db_stop_watch,
+    use_invite,
 )
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
@@ -35,6 +36,46 @@ def _user_display_name(u) -> str | None:
     return (u.first_name or u.username or None) if u else None
 
 
+WELCOME_AFTER_INVITE = (
+    "Доступ открыт! Я слежу за свободными местами в маршрутках Беларуси.\n"
+    "Напиши, что нужно — например: «следи за Минск → Барановичи завтра утром»."
+)
+ADMIN_GREETING = "Ты админ. Напиши «дай инвайт», чтобы пригласить человека."
+INVITE_REJECT = ("Ссылка не работает или уже использована. "
+                 "Попроси новую у того, кто тебя пригласил.")
+
+
+async def handle_unauthorized_message(user_id: int, text: str) -> tuple[str, bool] | None:
+    """Возвращает (ответ, авторизован_ли) или None — стандартный отказ.
+    Подбор инвайт-токена НЕ инкрементит счётчик бана, подбор /auth — да."""
+    text = text.strip()
+    if text.startswith("/start"):
+        parts = text.split(maxsplit=1)
+        token = parts[1].strip() if len(parts) > 1 else ""
+        if not token:
+            return None
+        if await use_invite(token, user_id):
+            return (WELCOME_AFTER_INVITE, True)
+        return (INVITE_REJECT, False)
+    if text == AUTH_CODE:
+        await authorize_user(user_id, role="admin")
+        return (ADMIN_GREETING, True)
+    if text.startswith("/auth"):
+        parts = text.split(maxsplit=1)
+        code = parts[1].strip() if len(parts) > 1 else ""
+        if not code:
+            return ("Использование: /auth <код>", False)
+        if code == AUTH_CODE:
+            await authorize_user(user_id, role="admin")
+            return (ADMIN_GREETING, True)
+        failed = await increment_failed_attempts(user_id)
+        remaining = MAX_AUTH_ATTEMPTS - failed
+        if remaining <= 0:
+            return ("Неверный код. Вы заблокированы.", False)
+        return (f"Неверный код. Осталось попыток: {remaining}", False)
+    return None
+
+
 class AuthMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -53,26 +94,14 @@ class AuthMiddleware(BaseMiddleware):
             return None
 
         if isinstance(event, Message) and event.text:
-            text = event.text.strip()
-            if text.startswith("/auth"):
-                parts = text.split(maxsplit=1)
-                code = parts[1].strip() if len(parts) > 1 else ""
-                if not code:
-                    await event.answer("Использование: /auth <код>")
-                    return None
-                if code == AUTH_CODE:
-                    await authorize_user(user.id)
+            result = await handle_unauthorized_message(user.id, event.text)
+            if result is not None:
+                reply, authorized = result
+                if authorized:
                     state: FSMContext | None = data.get("state")
                     if state is not None:
                         await state.clear()
-                    await event.answer("Доступ разрешён. /start — начать.")
-                    return None
-                failed = await increment_failed_attempts(user.id)
-                remaining = MAX_AUTH_ATTEMPTS - failed
-                if remaining <= 0:
-                    await event.answer("Неверный код. Вы заблокированы.")
-                else:
-                    await event.answer(f"Неверный код. Осталось попыток: {remaining}")
+                await event.answer(reply)
                 return None
 
         if isinstance(event, Message):
@@ -137,6 +166,17 @@ async def cmd_start(message: Message):
         "/list — активные задачи\n"
         "/stop <id> — остановить задачу"
     )
+
+
+@router.message(Command("auth"))
+async def cmd_auth(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    code = parts[1].strip() if len(parts) > 1 else ""
+    if code == AUTH_CODE:
+        await set_user_role(message.from_user.id, "admin")
+        await message.answer(ADMIN_GREETING)
+    else:
+        await message.answer("Неверный код.")
 
 
 @router.message(Command("watch"))
@@ -386,6 +426,11 @@ async def on_voice_or_audio(message: Message, state: FSMContext):
 @router.message(F.text)
 async def on_text_fallback(message: Message, state: FSMContext):
     if await state.get_state() is not None:
+        return
+    if message.text and message.text.strip() == AUTH_CODE:
+        # код не должен утекать в историю LLM
+        await set_user_role(message.from_user.id, "admin")
+        await message.answer(ADMIN_GREETING)
         return
     if message.text and message.text.startswith("/"):
         return
