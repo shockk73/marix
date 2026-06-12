@@ -159,6 +159,8 @@ class LLMAgent:
     async def run_turn(self, user_id: int, text: str, user_name: str | None) -> None:
         async with self._lock_for(user_id):
             await db_module.set_user_name(user_id, user_name)
+            if await self._try_answer_form_with_text(user_id, text):
+                return
             await self._auto_cancel_pending(user_id)
             await db_module.insert_chat_message(user_id, "user", content=text)
             await self._drive_turn(user_id)
@@ -635,9 +637,26 @@ class LLMAgent:
             message_id=sent.message_id,
         )
 
+    async def _send_form_question(self, user_id: int, payload: dict) -> int:
+        """Шлёт ТЕКУЩИЙ вопрос формы (по одному за раз — текстовый ответ
+        всегда однозначен). Возвращает message_id."""
+        questions = payload["questions"]
+        idx = payload["idx"]
+        q = questions[idx]
+        rows = [[InlineKeyboardButton(text=opt[:64],
+                                      callback_data=f"aim:{idx}:{oi}")]
+                for oi, opt in enumerate(q["options"])]
+        sent = await self._send_markdown_message(
+            user_id,
+            f"({idx + 1}/{len(questions)}) {q['question']}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        payload.setdefault("message_ids", []).append(sent.message_id)
+        return sent.message_id
+
     async def _handle_ask_form(self, user_id: int, tool_call_id: str, args: dict) -> bool:
-        """Форма из 2–4 вопросов, каждый отдельным сообщением с кнопками.
-        Ответы копятся в pending; когда есть все — один tool-result.
+        """Форма из 2–4 вопросов, задаются ПО ОДНОМУ (ответ кнопкой или
+        текстом), ответы копятся и возвращаются одним tool-result.
         False — аргументы невалидны, в историю ушёл tool-error."""
         questions = args.get("questions")
         error = None
@@ -659,88 +678,118 @@ class LLMAgent:
             )
             return False
 
-        total = len(questions)
-        message_ids: list[int] = []
-        norm_questions: list[dict[str, Any]] = []
-        for qi, q in enumerate(questions):
-            opts = [str(o) for o in q["options"]][:8]
-            rows = [[InlineKeyboardButton(text=opt[:64],
-                                          callback_data=f"aim:{qi}:{oi}")]
-                    for oi, opt in enumerate(opts)]
-            sent = await self._send_markdown_message(
-                user_id,
-                f"({qi + 1}/{total}) {str(q['question'])}",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-            )
-            message_ids.append(sent.message_id)
-            norm_questions.append({"question": str(q["question"]),
-                                   "options": opts})
+        payload = {
+            "kind": "form",
+            "questions": [{"question": str(q["question"]),
+                           "options": [str(o) for o in q["options"]][:8]}
+                          for q in questions],
+            "answers": {},
+            "idx": 0,
+            "message_ids": [],
+        }
+        first_mid = await self._send_form_question(user_id, payload)
         await db_module.set_pending_tool_call(
             user_id=user_id, tool_call_id=tool_call_id,
             tool_name="ask_user_form",
-            options_json=json.dumps({
-                "kind": "form",
-                "questions": norm_questions,
-                "answers": {},
-                "message_ids": message_ids,
-            }, ensure_ascii=False),
-            message_id=message_ids[0],
+            options_json=json.dumps(payload, ensure_ascii=False),
+            message_id=first_mid,
         )
         return True
+
+    async def _advance_form(
+        self, user_id: int, pending: dict, payload: dict, answer: str,
+    ) -> str:
+        """Записывает ответ на текущий вопрос, шлёт следующий или финализирует.
+        Возвращает recorded|done. Вызывать под локом."""
+        questions = payload["questions"]
+        idx = payload["idx"]
+        payload["answers"][str(idx)] = answer
+
+        message_ids = payload.get("message_ids") or []
+        if idx < len(message_ids):
+            try:
+                await self._bot.edit_message_reply_markup(
+                    chat_id=user_id, message_id=message_ids[idx],
+                    reply_markup=None,
+                )
+            except Exception as e:
+                logger.debug("Form keyboard strip failed: %s", e)
+
+        if idx + 1 < len(questions):
+            payload["idx"] = idx + 1
+            await self._send_form_question(user_id, payload)
+            await db_module.set_pending_tool_call(
+                user_id=user_id, tool_call_id=pending["tool_call_id"],
+                tool_name="ask_user_form",
+                options_json=json.dumps(payload, ensure_ascii=False),
+                message_id=pending["message_id"],
+            )
+            return "recorded"
+
+        result = {q["question"]: payload["answers"][str(i)]
+                  for i, q in enumerate(questions)}
+        await db_module.delete_pending_tool_call(user_id)
+        await db_module.insert_chat_message(
+            user_id, "tool",
+            content=json.dumps({"answers": result}, ensure_ascii=False),
+            tool_call_id=pending["tool_call_id"],
+        )
+        await self._drive_turn(user_id)
+        return "done"
+
+    @staticmethod
+    def _form_payload(pending: dict | None) -> dict | None:
+        if pending is None:
+            return None
+        try:
+            payload = json.loads(pending["options_json"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("kind") != "form":
+            return None
+        return payload
 
     async def answer_form_option(self, user_id: int, q_idx: int, opt_idx: int) -> str:
         """Клик по кнопке формы. Возвращает stale|dup|recorded|done."""
         async with self._lock_for(user_id):
             pending = await db_module.get_pending_tool_call(user_id)
-            if pending is None:
-                return "stale"
-            try:
-                payload = json.loads(pending["options_json"])
-            except (json.JSONDecodeError, TypeError):
-                return "stale"
-            if not isinstance(payload, dict) or payload.get("kind") != "form":
+            payload = self._form_payload(pending)
+            if payload is None:
                 return "stale"
             questions = payload.get("questions") or []
             if not (0 <= q_idx < len(questions)):
                 return "stale"
+            if str(q_idx) in (payload.get("answers") or {}):
+                return "dup"
+            if q_idx != payload.get("idx"):
+                return "stale"
             options = questions[q_idx].get("options") or []
             if not (0 <= opt_idx < len(options)):
                 return "stale"
-            answers = payload.get("answers") or {}
-            if str(q_idx) in answers:
-                return "dup"
-            answers[str(q_idx)] = options[opt_idx]
-            payload["answers"] = answers
+            return await self._advance_form(
+                user_id, pending, payload, options[opt_idx])
 
-            message_ids = payload.get("message_ids") or []
-            if q_idx < len(message_ids):
-                try:
-                    await self._bot.edit_message_reply_markup(
-                        chat_id=user_id, message_id=message_ids[q_idx],
-                        reply_markup=None,
-                    )
-                except Exception as e:
-                    logger.debug("Form keyboard strip failed: %s", e)
+    _FORM_ABORT_WORDS = {"отмена", "стоп", "забей", "не надо", "отстань",
+                         "cancel", "хватит"}
 
-            if len(answers) < len(questions):
-                await db_module.set_pending_tool_call(
-                    user_id=user_id, tool_call_id=pending["tool_call_id"],
-                    tool_name="ask_user_form",
-                    options_json=json.dumps(payload, ensure_ascii=False),
-                    message_id=pending["message_id"],
-                )
-                return "recorded"
-
-            result = {q["question"]: answers[str(i)]
-                      for i, q in enumerate(questions)}
-            await db_module.delete_pending_tool_call(user_id)
-            await db_module.insert_chat_message(
-                user_id, "tool",
-                content=json.dumps({"answers": result}, ensure_ascii=False),
-                tool_call_id=pending["tool_call_id"],
-            )
-            await self._drive_turn(user_id)
-            return "done"
+    async def _try_answer_form_with_text(self, user_id: int, text: str) -> bool:
+        """Текст во время активной формы = ответ на ТЕКУЩИЙ вопрос (вопросы
+        идут по одному, двусмысленности нет). Длинный текст, вопрос или
+        стоп-слово — не ответ: форма снимется обычным путём. Вызывать под
+        локом. True — текст поглощён формой."""
+        pending = await db_module.get_pending_tool_call(user_id)
+        payload = self._form_payload(pending)
+        if payload is None:
+            return False
+        answer = text.strip()
+        if not answer or len(answer) > 40 or "?" in answer:
+            return False
+        lowered = answer.lower().rstrip(".!…")
+        first_word = lowered.split()[0].strip(",.!…") if lowered.split() else ""
+        if lowered in self._FORM_ABORT_WORDS or first_word in self._FORM_ABORT_WORDS:
+            return False
+        await self._advance_form(user_id, pending, payload, answer)
+        return True
 
     async def _handle_confirmation(
         self, user_id: int, tool_call_id: str, name: str, args: dict,

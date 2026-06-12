@@ -192,7 +192,7 @@ FORM_QUESTIONS = [
 
 
 @pytest.mark.asyncio
-async def test_ask_user_form_renders_and_collects_all_answers(tmp_db, fake_bot, fake_scheduler):
+async def test_ask_user_form_sequential_one_question_at_a_time(tmp_db, fake_bot, fake_scheduler):
     client = AsyncMock()
     client.chat_completion = AsyncMock(side_effect=[
         _form_tool_call(FORM_QUESTIONS),
@@ -202,23 +202,53 @@ async def test_ask_user_form_renders_and_collects_all_answers(tmp_db, fake_bot, 
 
     await agent.run_turn(user_id=1, text="следи", user_name=None)
 
+    # на экране только ПЕРВЫЙ вопрос — текстовый ответ всегда однозначен
+    form_msgs = [m for m in fake_bot.sent if m["reply_markup"] is not None]
+    assert len(form_msgs) == 1
+    assert "(1/2)" in form_msgs[0]["text"] and "Когда едем" in form_msgs[0]["text"]
+    assert form_msgs[0]["reply_markup"].inline_keyboard[0][0].callback_data == "aim:0:0"
+    # клик по ещё не заданному вопросу невозможен/устарел
+    assert await agent.answer_form_option(1, 1, 0) == "stale"
+
+    # ответ на первый — появляется второй
+    assert await agent.answer_form_option(1, 0, 0) == "recorded"
     form_msgs = [m for m in fake_bot.sent if m["reply_markup"] is not None]
     assert len(form_msgs) == 2
-    assert "(1/2)" in form_msgs[0]["text"] and "Когда едем" in form_msgs[0]["text"]
     assert "(2/2)" in form_msgs[1]["text"]
-    kb0 = form_msgs[0]["reply_markup"].inline_keyboard
-    assert kb0[0][0].callback_data == "aim:0:0"
 
-    # отвечаем на оба вопроса (второй — раньше первого, порядок не важен)
-    assert await agent.answer_form_option(1, 1, 1) == "recorded"
-    assert await agent.answer_form_option(1, 0, 0) == "done"
-
+    # ответ на второй — финал
+    assert await agent.answer_form_option(1, 1, 1) == "done"
     assert await db_module.get_pending_tool_call(1) is None
     msgs = await db_module.get_recent_chat_messages(1, 100)
     tool_msgs = [m for m in msgs if m["role"] == "tool"]
     answers = json.loads(tool_msgs[-1]["content"])["answers"]
     assert answers == {"Когда едем?": "завтра", "Какое время?": "вечер"}
     assert fake_bot.sent[-1]["text"] == "Понял: завтра вечером."
+
+
+@pytest.mark.asyncio
+async def test_ask_user_form_text_answers_current_question(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        _form_tool_call(FORM_QUESTIONS),
+        {"role": "assistant", "content": "Готово."},
+    ])
+    agent = _mk_agent(fake_bot, client)
+    await agent.run_turn(user_id=1, text="следи", user_name=None)
+
+    # текст = ответ на текущий вопрос; модель НЕ дёргается
+    await agent.run_turn(user_id=1, text="в субботу", user_name=None)
+    assert client.chat_completion.call_count == 1
+    pending = await db_module.get_pending_tool_call(1)
+    payload = json.loads(pending["options_json"])
+    assert payload["answers"] == {"0": "в субботу"}
+    assert payload["idx"] == 1
+
+    # смешанный ввод: второй — кнопкой
+    assert await agent.answer_form_option(1, 1, 0) == "done"
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    answers = json.loads([m for m in msgs if m["role"] == "tool"][-1]["content"])["answers"]
+    assert answers == {"Когда едем?": "в субботу", "Какое время?": "утро"}
 
 
 @pytest.mark.asyncio
@@ -349,6 +379,24 @@ async def test_text_question_retry_gives_up_after_one_try(tmp_db, fake_bot, fake
     # после одного ретрая ответ принимается как есть
     assert client.chat_completion.call_count == 2
     assert fake_bot.sent[-1]["text"] == "Ну что, едем?"
+
+
+@pytest.mark.asyncio
+async def test_ask_user_form_question_text_cancels_form(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        _form_tool_call(FORM_QUESTIONS),
+        {"role": "assistant", "content": "Автобронь — это…"},
+    ])
+    agent = _mk_agent(fake_bot, client)
+    await agent.run_turn(user_id=1, text="следи", user_name=None)
+
+    # вопрос юзера — не ответ на форму: форма снимается, текст идёт модели
+    await agent.run_turn(user_id=1, text="а что такое автобронь?", user_name=None)
+
+    assert await db_module.get_pending_tool_call(1) is None
+    assert client.chat_completion.call_count == 2
+    assert fake_bot.sent[-1]["text"] == "Автобронь — это…"
 
 
 @pytest.mark.asyncio

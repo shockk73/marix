@@ -3,7 +3,7 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-12-worldview-v9"
+LLM_SESSION_VERSION = "2026-06-12-worldview-v10"
 
 
 def build_system_prompt(
@@ -203,7 +203,8 @@ def build_system_prompt(
         *directions_lines,
         "- Не выдумывай результаты — всегда вызывай нужный tool. Недостающие "
         "значения не угадывай: спроси (ask_user — один вопрос, ask_user_form — "
-        "2–4 вопроса разом; кнопки лучше текста).",
+        "2–4 вопроса; система задаёт их ПО ОДНОМУ, ответ кнопкой или коротким "
+        "текстом, тебе вернутся все разом).",
         "- show_screen — экран с сеткой кнопок: даты (ближайшие 7 дней), окна "
         "времени (🌅 Утро 05:00–12:00 / 🌞 День 12:00–17:00 / 🌆 Вечер 17:00–23:00 / "
         "Весь день), подтверждения, карточки слежек. Для свободного ввода экран "
