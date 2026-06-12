@@ -787,10 +787,22 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
         })
         created_ids.append(wid)
 
+    note = None
+    if "baranovichi_express" in providers and autobook == "off":
+        if await db_module.get_site_credentials(ctx.user_id) is None:
+            note = ("Аккаунт автоброни НЕ подключён. Подтверди создание "
+                    "слежки одной фразой и предложи экраном show_screen: "
+                    "«🔑 Подключить автобронь» / «🔕 Просто уведомлять». "
+                    "Если пользователь уже отказывался в этом диалоге — "
+                    "не предлагай повторно.")
+        else:
+            note = ("Скажи пользователю одной фразой: уведомления о местах "
+                    "Барановичей придут с кнопкой «Забронировать».")
     return json.dumps({
         "created_ids": created_ids,
         "goal_id": goal_id,
         "autobook": autobook,
+        "note": note,
     }, ensure_ascii=False)
 
 

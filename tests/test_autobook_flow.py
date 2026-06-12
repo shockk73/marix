@@ -618,10 +618,23 @@ async def test_create_watch_bounces_without_autobook_choice(tmp_db, fake_schedul
         "create_watch", {**base, "autobook": "off"}, ctx))
     assert len(out["created_ids"]) == 2
 
-    # без аккаунта вопрос не нужен — создаётся сразу
+    # без аккаунта вопрос не нужен — создаётся сразу, но с подсказкой
+    # предложить подключение
     await db_module.delete_site_credentials(1)
     out = json.loads(await dispatch_tool("create_watch", dict(base), ctx))
     assert "created_ids" in out
+    assert "Подключить автобронь" in out["note"]
+
+    # с аккаунтом и явным off — подсказка про кнопку брони в уведомлениях
+    await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
+    out = json.loads(await dispatch_tool(
+        "create_watch", {**base, "autobook": "off"}, ctx))
+    assert "Забронировать" in out["note"]
+
+    # без барановичей подсказки нет
+    out = json.loads(await dispatch_tool("create_watch", {
+        **base, "providers": ["atlasbus"]}, ctx))
+    assert out["note"] is None
 
 
 @pytest.mark.asyncio

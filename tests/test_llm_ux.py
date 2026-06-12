@@ -341,6 +341,25 @@ async def test_plain_json_in_text_left_untouched(tmp_db, fake_bot, fake_schedule
     assert await db_module.get_pending_tool_call(1) is None
 
 
+def test_thinking_label_carries_call_context():
+    from llm.agent import _thinking_label
+    label = _thinking_label("check_trips_now", {
+        "provider": "atlasbus", "direction": "baran_mnsk",
+        "date": "2026-06-16", "time_from": "17:00", "time_to": "23:00"})
+    assert label == "Проверяю Атласбус: Барановичи → Минск, 16.06, 17:00–23:00…"
+
+    label = _thinking_label("book_trip_now", {
+        "departure_time": "08:00", "direction": "mnsk_baran",
+        "date": "2026-06-14"})
+    assert label == "Бронирую 08:00, Минск → Барановичи, 14.06…"
+
+    assert _thinking_label("cancel_booking", {"booking_id": 7}) == "Отменяю бронь #7…"
+    # неполные аргументы -> статичный фоллбек
+    assert _thinking_label("check_trips_now", {}) == "Проверяю рейсы…"
+    # быстрые тулзы молчат
+    assert _thinking_label("list_watches", {}) is None
+
+
 @pytest.mark.asyncio
 async def test_repeated_preface_not_sent_twice(tmp_db, fake_bot, fake_scheduler):
     """Первый show_screen невалиден -> модель повторяет с тем же текстом:

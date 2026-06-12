@@ -20,6 +20,8 @@ from llm.client import OpenRouterClient
 from llm.history import to_openai_messages
 from llm.prompt import build_system_prompt
 from llm.tools import ToolContext, build_tools_for_role, dispatch_tool
+from providers import PROVIDERS
+from providers.base import DIRECTION_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,45 @@ _TOOL_THINKING_LABELS = {
     "book_trip_now": "Бронирую…",
     "get_baranovichi_stops": "Смотрю остановки…",
 }
+
+
+def _short_date(date: str) -> str:
+    return f"{date[8:10]}.{date[5:7]}" if len(date) == 10 else date
+
+
+def _thinking_label(name: str, args: dict) -> str | None:
+    """Человекочитаемый лейбл с контекстом вызова — юзер видит, ЧТО именно
+    проверяется/бронируется, а не безликое «Проверяю рейсы…»."""
+    static = _TOOL_THINKING_LABELS.get(name)
+    if static is None:
+        return None
+    try:
+        if name == "check_trips_now":
+            provider = PROVIDERS.get(args.get("provider"))
+            direction = DIRECTION_LABELS.get(args.get("direction"))
+            date = _short_date(args.get("date") or "")
+            if provider and direction and date:
+                window = ""
+                if args.get("time_from") and args.get("time_to"):
+                    window = f", {args['time_from']}–{args['time_to']}"
+                return (f"Проверяю {provider.display_name}: {direction}, "
+                        f"{date}{window}…")
+        elif name == "book_trip_now":
+            direction = DIRECTION_LABELS.get(args.get("direction"))
+            if direction and args.get("departure_time"):
+                return (f"Бронирую {args['departure_time']}, {direction}, "
+                        f"{_short_date(args.get('date') or '')}…")
+        elif name == "cancel_booking":
+            if args.get("booking_id") is not None:
+                return f"Отменяю бронь #{args['booking_id']}…"
+        elif name == "get_baranovichi_stops":
+            direction = DIRECTION_LABELS.get(args.get("direction"))
+            if direction:
+                return (f"Смотрю остановки: {direction}, "
+                        f"{_short_date(args.get('date') or '')}…")
+    except Exception as e:
+        logger.debug("thinking label build failed: %s", e)
+    return static
 
 # State-changing инструменты: выполняются только после явного «Да» юзера.
 CONFIRM_REQUIRED = {
@@ -573,7 +614,9 @@ class LLMAgent:
                     args = json.loads(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                label = _TOOL_THINKING_LABELS.get(name)
+                # подтверждаемые тулзы получают лейбл после «Да» (в resolve)
+                label = (None if name in CONFIRM_REQUIRED
+                         else _thinking_label(name, args))
                 if label:
                     try:
                         await self._bot.send_message(user_id, f"🔧 {label}")
@@ -839,6 +882,13 @@ class LLMAgent:
                     bot_username=self._bot_username,
                     bot=self._bot,
                 )
+                label = _thinking_label(payload["name"],
+                                        payload.get("args") or {})
+                if label:
+                    try:
+                        await self._bot.send_message(user_id, f"🔧 {label}")
+                    except Exception as e:
+                        logger.debug("confirm label send failed: %s", e)
                 try:
                     result = await dispatch_tool(
                         payload["name"], payload.get("args") or {}, ctx)
