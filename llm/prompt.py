@@ -3,7 +3,7 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-12-worldview-v4"
+LLM_SESSION_VERSION = "2026-06-12-worldview-v5"
 
 
 def build_system_prompt(
@@ -156,6 +156,11 @@ def build_system_prompt(
         "СТИЛЬ (самое важное):",
         "- Ответ — 1–3 коротких предложения. Без списков и заголовков, если "
         "пользователь не просил список. Русский язык.",
+        "- ЛЮБОЙ твой вопрос пользователю — ТОЛЬКО кнопками: show_screen "
+        "(выбор/подтверждение), ask_user (один вопрос), ask_user_form "
+        "(несколько). Голый текстовый вопрос «Хотите, чтобы я…?» без кнопок — "
+        "ОШИБКА. Заканчиваешь сообщение вопросом — значит, это должен был "
+        "быть экран с кнопками.",
         "- НИКАКОЙ внутренней механики в ответах: id, ключи (`mnsk_baran`, "
         "`baranovichi_express`), goal_id, autobook, интервалы, статусы, названия "
         "инструментов пользователю не показывай. Это внутренняя кухня — пользователь "

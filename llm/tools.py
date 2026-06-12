@@ -657,6 +657,18 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
     autobook = args.get("autobook") or "off"
     if autobook not in ("off", "confirm", "auto"):
         return _err("autobook must be off|confirm|auto")
+    if ("autobook" not in args
+            and "baranovichi_express" in providers
+            and await db_module.get_site_credentials(ctx.user_id) is not None):
+        # аккаунт подключён, а выбор не сделан — слежку не создаём,
+        # сначала спроси пользователя кнопками
+        return _err(
+            "У пользователя подключён аккаунт автоброни, но autobook не "
+            "выбран. СНАЧАЛА спроси пользователя экраном show_screen с двумя "
+            "кнопками: «⚡ Бронировать самому» (value: автобронь авто) и "
+            "«🔔 Только уведомлять» (value: только уведомления), затем вызови "
+            "create_watch снова с autobook=auto или autobook=off. "
+            "При off уведомления всё равно будут с кнопкой «Забронировать»")
     if autobook != "off":
         if "baranovichi_express" not in providers:
             return _err("autobook доступен только для baranovichi_express")
@@ -789,13 +801,22 @@ async def _tool_check_trips_now(args: dict, ctx: ToolContext) -> str:
 
     filtered = [t for t in trips if tf <= t.departure_time <= tt]
     bookable = provider_key == "baranovichi_express"
+    available = [t for t in filtered if t.free_seats > 0]
+    if not bookable:
+        note = ("Этот перевозчик НЕ поддерживает бронь — не предлагай "
+                "забронировать его рейсы, только уведомления/слежку.")
+    elif available:
+        note = ("Рейсы бронируемые: предлагай выбор ЭКРАНОМ show_screen — "
+                "кнопки с временами (value: «забронируй HH:MM»), не текстовым "
+                "вопросом.")
+    else:
+        note = ("Мест нет: предложи слежку кнопками show_screen "
+                "(«🔔 Следить» / «Не надо»), не текстовым вопросом.")
     return json.dumps({
         "provider": provider_key,
         "provider_display": provider.display_name,
         "bookable": bookable,
-        "note": (None if bookable
-                 else "Этот перевозчик НЕ поддерживает бронь — не предлагай "
-                      "забронировать его рейсы, только уведомления/слежку."),
+        "note": note,
         "trips": [{
             "trip_id": t.trip_id, "departure_time": t.departure_time,
             "free_seats": t.free_seats, "price": t.price, "currency": t.currency,

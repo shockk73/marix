@@ -590,7 +590,38 @@ async def test_check_trips_now_marks_bookable(tmp_db, baran_provider, monkeypatc
     assert atlas_out["bookable"] is False
     assert "не предлагай" in atlas_out["note"].lower()
     assert baran_out["bookable"] is True
-    assert baran_out["note"] is None
+    assert "show_screen" in baran_out["note"]      # выбор рейса — кнопками
+
+    baran_provider.trips = [_trip("b2", "15:00", free_seats=0)]
+    empty_out = json.loads(await dispatch_tool(
+        "check_trips_now", {**args, "provider": "baranovichi_express"}, ctx))
+    assert "Мест нет" in empty_out["note"]
+    assert "🔔 Следить" in empty_out["note"]
+
+
+@pytest.mark.asyncio
+async def test_create_watch_bounces_without_autobook_choice(tmp_db, fake_scheduler, fake_booker):
+    await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
+    ctx = ToolContext(user_id=1)
+    base = {
+        "providers": ["baranovichi_express", "atlasbus"],
+        "direction": "mnsk_baran", "date": "2099-06-14",
+        "time_from": "10:00", "time_to": "20:00",
+    }
+    # аккаунт есть, autobook не передан → отбой с инструкцией спросить кнопками
+    out = json.loads(await dispatch_tool("create_watch", dict(base), ctx))
+    assert "error" in out
+    assert "show_screen" in out["error"]
+
+    # явный выбор off → создаётся
+    out = json.loads(await dispatch_tool(
+        "create_watch", {**base, "autobook": "off"}, ctx))
+    assert len(out["created_ids"]) == 2
+
+    # без аккаунта вопрос не нужен — создаётся сразу
+    await db_module.delete_site_credentials(1)
+    out = json.loads(await dispatch_tool("create_watch", dict(base), ctx))
+    assert "created_ids" in out
 
 
 @pytest.mark.asyncio
