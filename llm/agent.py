@@ -29,26 +29,12 @@ def _default_now() -> datetime:
     return datetime.now(_MSK)
 
 
+# Лейблы только у медленных (сетевых) операций — быстрые тулзы молчат,
+# чтобы не засорять чат «🔧»-сообщениями.
 _TOOL_THINKING_LABELS = {
-    "list_watches": "Смотрю активные отслеживания…",
-    "create_watch": "Создаю отслеживание…",
-    "stop_watch": "Останавливаю отслеживание…",
-    "stop_all_watches": "Останавливаю все отслеживания…",
-    "check_trips_now": "Проверяю рейсы сейчас…",
-    "ask_user": "Уточняю…",
-    "ask_user_form": "Уточняю детали…",
-    "get_atlas_proxy_status": "Смотрю настройки Atlas proxy…",
-    "set_atlas_proxy_target": "Меняю Atlas proxy target…",
-    "schedule_self_callback": "Планирую callback…",
-    "list_self_callbacks": "Смотрю отложенные callback-и…",
-    "create_invite": "Создаю инвайт…",
-    "list_invites": "Смотрю инвайты…",
-    "show_screen": "Собираю экран…",
+    "check_trips_now": "Проверяю рейсы…",
     "generate_sessions_report": "Готовлю отчёт…",
     "save_baranovichi_credentials": "Подключаю аккаунт…",
-    "get_credentials_status": "Смотрю статус автоброни…",
-    "delete_credentials": "Отключаю аккаунт…",
-    "list_bookings": "Смотрю брони…",
     "cancel_booking": "Отменяю бронь…",
     "book_trip_now": "Бронирую…",
     "get_baranovichi_stops": "Смотрю остановки…",
@@ -488,11 +474,12 @@ class LLMAgent:
                     args = json.loads(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                label = _TOOL_THINKING_LABELS.get(name, f"Выполняю {name}…")
-                try:
-                    await self._bot.send_message(user_id, f"🔧 {label}")
-                except Exception as e:
-                    logger.debug("thinking label send failed: %s", e)
+                label = _TOOL_THINKING_LABELS.get(name)
+                if label:
+                    try:
+                        await self._bot.send_message(user_id, f"🔧 {label}")
+                    except Exception as e:
+                        logger.debug("thinking label send failed: %s", e)
 
                 if name == "ask_user":
                     await self._handle_ask_user(user_id, tc_id, args)

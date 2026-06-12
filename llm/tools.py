@@ -67,8 +67,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "date": {"type": "string", "description": "YYYY-MM-DD"},
                     "time_from": {"type": "string", "description": "HH:MM"},
                     "time_to": {"type": "string", "description": "HH:MM"},
-                    "interval_sec": {"type": "integer",
-                                     "description": "Минимум 60"},
+                    "interval_sec": {
+                        "type": "integer",
+                        "description": ("Интервал проверки, секунд. По умолчанию "
+                                        "120 — пользователя об этом НЕ спрашивай. "
+                                        "Минимум 60."),
+                    },
                     "autobook": {
                         "type": "string",
                         "enum": ["off", "confirm", "auto"],
@@ -113,7 +117,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["providers", "direction", "date",
-                             "time_from", "time_to", "interval_sec"],
+                             "time_from", "time_to"],
             },
         },
     },
@@ -634,6 +638,8 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
         return _err("time_from/time_to must be HH:MM")
 
     interval = args.get("interval_sec")
+    if interval is None:
+        interval = 120
     if not isinstance(interval, int) or interval < 60:
         return _err("interval_sec must be integer >= 60")
 

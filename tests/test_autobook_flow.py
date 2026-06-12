@@ -508,6 +508,17 @@ async def test_create_watch_joins_existing_goal(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
+async def test_create_watch_default_interval_120(tmp_db, fake_scheduler):
+    ctx = ToolContext(user_id=1)
+    out = json.loads(await dispatch_tool("create_watch", {
+        "providers": ["atlasbus"], "direction": "mnsk_baran",
+        "date": "2099-06-14", "time_from": "00:00", "time_to": "23:59",
+    }, ctx))
+    w = await db_module.get_watch(out["created_ids"][0])
+    assert w["interval_sec"] == 120
+
+
+@pytest.mark.asyncio
 async def test_list_watches_exposes_goal_autobook_pref(tmp_db, fake_scheduler):
     await db_module.create_watch(
         user_id=1, provider="baranovichi_express", direction="mnsk_baran",
