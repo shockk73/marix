@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -28,6 +29,7 @@ class FakeBooker:
 
     async def book(self, user_id, date, direction, departure_time):
         self.book_calls.append((user_id, date, direction, departure_time))
+        await asyncio.sleep(0.01)  # окно для гонок — лок обязан их закрывать
         if self.book_error:
             raise self.book_error
         return self.book_result
@@ -251,6 +253,71 @@ async def test_execute_rebooking_cancels_old(tmp_db, fake_booker):
     assert active[0]["departure_time"] == "14:30"
     assert (await db_module.get_watch(watch["id"]))["active"] == 0
     assert "Старая бронь 12:30 отменена" in text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_goal_booking_books_once(tmp_db, fake_booker):
+    watch = await _mk_watch_row(autobook="auto", goal_id="g10")
+
+    results = await asyncio.gather(
+        booking_flow.execute_booking(
+            user_id=1, date="2099-06-14", direction="mnsk_baran",
+            departure_time="12:30", watch=watch),
+        booking_flow.execute_booking(
+            user_id=1, date="2099-06-14", direction="mnsk_baran",
+            departure_time="13:00", watch=watch),
+    )
+
+    statuses = sorted(r[0] for r in results)
+    assert statuses == ["already_booked", "booked"]
+    assert len(fake_booker.book_calls) == 1       # на сайт сходили один раз
+    assert len(await db_module.get_user_bookings(1)) == 1
+
+
+@pytest.mark.asyncio
+async def test_rebook_race_targets_current_active_booking(tmp_db, fake_booker):
+    watch = await _mk_watch_row(autobook="auto", goal_id="g11",
+                                pref_from="14:00", pref_to="15:00",
+                                time_from="12:00", time_to="16:00")
+    stale_id = await db_module.create_booking(
+        user_id=1, date="2099-06-14", direction="mnsk_baran",
+        departure_time="12:30", ticket_id="111", trip_id="222", goal_id="g11")
+    stale = await db_module.get_booking(stale_id)
+    # параллельная перебронь уже заменила 12:30 на 13:00 — ссылка протухла
+    await db_module.mark_booking_canceled(stale_id)
+    current_id = await db_module.create_booking(
+        user_id=1, date="2099-06-14", direction="mnsk_baran",
+        departure_time="13:00", ticket_id="333", trip_id="444", goal_id="g11")
+
+    status, text, _ = await booking_flow.execute_booking(
+        user_id=1, date="2099-06-14", direction="mnsk_baran",
+        departure_time="14:30", watch=watch, rebook_from=stale)
+
+    assert status == "booked"
+    # отменили актуальную бронь (13:00), а не по протухшей ссылке
+    assert fake_booker.cancel_calls == [(1, "333", "444")]
+    assert (await db_module.get_booking(current_id))["status"] == "canceled"
+    active = await db_module.get_user_bookings(1)
+    assert [b["departure_time"] for b in active] == ["14:30"]
+
+
+@pytest.mark.asyncio
+async def test_rebook_same_time_is_idempotent(tmp_db, fake_booker):
+    watch = await _mk_watch_row(autobook="auto", goal_id="g12",
+                                pref_from="14:00", pref_to="15:00",
+                                time_from="12:00", time_to="16:00")
+    bid = await db_module.create_booking(
+        user_id=1, date="2099-06-14", direction="mnsk_baran",
+        departure_time="14:30", ticket_id="111", trip_id="222", goal_id="g12")
+    old = await db_module.get_booking(bid)
+
+    status, _, _ = await booking_flow.execute_booking(
+        user_id=1, date="2099-06-14", direction="mnsk_baran",
+        departure_time="14:30", watch=watch, rebook_from=old)
+
+    assert status == "already_booked"
+    assert fake_booker.book_calls == []
+    assert (await db_module.get_booking(bid))["status"] == "active"
 
 
 @pytest.mark.asyncio

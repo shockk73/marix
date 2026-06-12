@@ -1,5 +1,6 @@
 """Общая логика бронирования: используется планировщиком (auto-режим),
 кнопками в уведомлениях (confirm/rebook) и LLM-тулзой book_trip_now."""
+import asyncio
 import logging
 
 import db as db_module
@@ -8,6 +9,18 @@ from providers.base import DIRECTION_LABELS
 from providers.baranovichi_session import BOOKER, InvalidCredentials
 
 logger = logging.getLogger(__name__)
+
+_booking_locks: dict[str, asyncio.Lock] = {}
+
+
+def _booking_lock(user_id: int, goal_id: str | None) -> asyncio.Lock:
+    """Один замок на цель (или на юзера, если бронь без цели)."""
+    key = goal_id or f"user:{user_id}"
+    lock = _booking_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _booking_locks[key] = lock
+    return lock
 
 
 def in_pref_window(watch: dict | None, departure_time: str) -> bool:
@@ -33,12 +46,50 @@ async def execute_booking(
     """Бронирует место и ведёт сопутствующее состояние (bookings, слежки).
 
     Возвращает (status, текст_для_юзера, остановленные_watch_id).
-    status: booked | gone | creds | error.
-    Слежки цели останавливаются в БД ДО отправки текста (защита от двойной
-    брони при рестарте); таска skip_cancel_watch_id не отменяется —
-    вызывающий poll-цикл завершает себя сам.
+    status: booked | already_booked | gone | creds | error.
+
+    Бронь по одной цели НЕ конкурентна: per-goal asyncio.Lock плюс повторная
+    проверка активной брони внутри лока — тик шедулера, клик по кнопке,
+    LLM-тулза или второй бронирующий провайдер не сделают две брони на одну
+    цель. Цель отмены при перебронировании тоже берётся заново внутри лока:
+    переданный rebook_from мог устареть в гонке.
     """
     goal_id = watch.get("goal_id") if watch else None
+    async with _booking_lock(user_id, goal_id):
+        if goal_id:
+            current = await db_module.get_active_goal_booking(user_id, goal_id)
+            if rebook_from is not None:
+                rebook_from = current
+            elif current is not None:
+                return ("already_booked",
+                        f"Уже забронировано {current['departure_time']} "
+                        f"({current['date']}) ✅",
+                        [])
+        if (rebook_from is not None
+                and rebook_from["departure_time"] == departure_time):
+            return ("already_booked",
+                    f"Уже забронировано {departure_time} ✅", [])
+        return await _execute_booking_locked(
+            user_id=user_id, date=date, direction=direction,
+            departure_time=departure_time, watch=watch, goal_id=goal_id,
+            rebook_from=rebook_from,
+            skip_cancel_watch_id=skip_cancel_watch_id,
+        )
+
+
+async def _execute_booking_locked(
+    user_id: int,
+    date: str,
+    direction: str,
+    departure_time: str,
+    watch: dict | None,
+    goal_id: str | None,
+    rebook_from: dict | None,
+    skip_cancel_watch_id: int | None,
+) -> tuple[str, str, list[int]]:
+    """Тело брони. Слежки цели останавливаются в БД ДО отправки текста
+    (защита от двойной брони при рестарте); таска skip_cancel_watch_id не
+    отменяется — вызывающий poll-цикл завершает себя сам."""
     try:
         result = await BOOKER.book(user_id, date, direction, departure_time)
     except InvalidCredentials:

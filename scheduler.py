@@ -279,6 +279,10 @@ async def _handle_autobook(watch: dict, newly: list[Trip]) -> bool:
             if watch["id"] in stopped:
                 raise WatchStopped()
             return True
+        if status == "already_booked":
+            # гонка: бронь по цели уже сделана другим путём (кнопка/тулза/
+            # другой watch) — молчим, следующий тик увидит бронь и разрулит
+            return True
         if status == "gone":
             return True  # место уже ушло — не дёргаем юзера
         if status == "creds":
