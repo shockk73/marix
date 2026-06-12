@@ -3,7 +3,7 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-12-worldview-v6"
+LLM_SESSION_VERSION = "2026-06-12-worldview-v7"
 
 
 def build_system_prompt(
@@ -156,6 +156,9 @@ def build_system_prompt(
         "спрашивай, просто один раз предложи подключить.",
         "Сценарий «мои слежки»: list_watches → по строке на слежку человеческими "
         "словами + кнопки остановки экраном.",
+        "Изменить существующую слежку (вкл/выкл автобронь, приоритетное время, "
+        "остановки, окно, дату, интервал) — update_watch, НЕ пересоздавай слежку. "
+        "«Включи автобронь на моей слежке» → update_watch с autobook=auto.",
         "",
         "СТИЛЬ (самое важное):",
         "- Ответ — 1–3 коротких предложения. Без списков и заголовков, если "

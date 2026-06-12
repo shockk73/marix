@@ -124,6 +124,43 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "update_watch",
+            "description": (
+                "Изменить активную слежку без пересоздания: режим автоброни "
+                "(off/confirm/auto), приоритетное окно, остановки, окно "
+                "времени, дату, интервал. Слежка перезапустится с новыми "
+                "параметрами. Пустая строка в pref_time_from/pickup_stop/"
+                "dropoff_stop очищает поле."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "watch_id": {"type": "integer"},
+                    "autobook": {
+                        "type": "string",
+                        "enum": ["off", "confirm", "auto"],
+                        "description": ("Переключить автобронь (только слежки "
+                                        "baranovichi_express, нужен аккаунт)."),
+                    },
+                    "pref_time_from": {"type": "string",
+                                       "description": "HH:MM или \"\" для очистки"},
+                    "pref_time_to": {"type": "string", "description": "HH:MM"},
+                    "pickup_stop": {"type": "string",
+                                    "description": "остановка посадки или \"\""},
+                    "dropoff_stop": {"type": "string",
+                                     "description": "остановка высадки или \"\""},
+                    "time_from": {"type": "string", "description": "HH:MM"},
+                    "time_to": {"type": "string", "description": "HH:MM"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "interval_sec": {"type": "integer", "description": "Минимум 60"},
+                },
+                "required": ["watch_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "stop_watch",
             "description": "Остановить одно отслеживание по его id.",
             "parameters": {
@@ -753,6 +790,113 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
     }, ensure_ascii=False)
 
 
+async def _tool_update_watch(args: dict, ctx: ToolContext) -> str:
+    watch_id = args.get("watch_id")
+    if not isinstance(watch_id, int):
+        return _err("watch_id must be integer")
+    w = await db_module.get_watch(watch_id)
+    if w is None or w["user_id"] != ctx.user_id or not w["active"]:
+        return _err(f"активная слежка #{watch_id} не найдена")
+
+    fields: dict = {}
+
+    if "autobook" in args:
+        mode = args.get("autobook") or "off"
+        if mode not in ("off", "confirm", "auto"):
+            return _err("autobook must be off|confirm|auto")
+        if mode != "off":
+            if w["provider"] != "baranovichi_express":
+                return _err("автобронь доступна только слежкам baranovichi_express")
+            creds = await db_module.get_site_credentials(ctx.user_id)
+            if creds is None:
+                return _err("Сначала подключи аккаунт сайта "
+                            "(save_baranovichi_credentials)")
+            try:
+                await BOOKER.verify_login(creds["phone"], creds["password"])
+            except InvalidCredentials:
+                return _err("Сохранённые креды не подходят — переподключи "
+                            "аккаунт (save_baranovichi_credentials)")
+            except Exception as e:
+                return _err(f"Не удалось проверить аккаунт — сайт недоступен "
+                            f"({type(e).__name__}), попробуй позже")
+        fields["autobook"] = mode
+
+    new_date = w["date"]
+    if "date" in args:
+        new_date = args.get("date") or ""
+        if not _valid_date(new_date):
+            return _err("date must be YYYY-MM-DD")
+        fields["date"] = new_date
+
+    tf = w["time_from"]
+    tt = w["time_to"]
+    if "time_from" in args:
+        tf = args.get("time_from") or ""
+        if not _valid_time(tf):
+            return _err("time_from must be HH:MM")
+        fields["time_from"] = tf
+    if "time_to" in args:
+        tt = args.get("time_to") or ""
+        if not _valid_time(tt):
+            return _err("time_to must be HH:MM")
+        fields["time_to"] = tt
+    if tf > tt:
+        return _err("time_from must be <= time_to")
+
+    pref_from = w.get("pref_time_from")
+    pref_to = w.get("pref_time_to")
+    if "pref_time_from" in args or "pref_time_to" in args:
+        pref_from = args.get("pref_time_from", pref_from)
+        pref_to = args.get("pref_time_to", pref_to)
+        if not pref_from and not pref_to:
+            pref_from = pref_to = None
+        elif not pref_from or not pref_to:
+            return _err("pref_time_from и pref_time_to задаются вместе "
+                        "(или обе пустые для очистки)")
+        else:
+            if not _valid_time(pref_from) or not _valid_time(pref_to):
+                return _err("pref_time_from/pref_time_to must be HH:MM")
+        fields["pref_time_from"] = pref_from
+        fields["pref_time_to"] = pref_to
+    if pref_from and not (tf <= pref_from <= pref_to <= tt):
+        return _err("приоритетное окно должно лежать внутри основного окна")
+
+    for stop_key in ("pickup_stop", "dropoff_stop"):
+        if stop_key in args:
+            value = args.get(stop_key) or None
+            if value and w["provider"] != "baranovichi_express":
+                return _err("остановки имеют смысл только для baranovichi_express")
+            fields[stop_key] = value
+
+    if "interval_sec" in args:
+        interval = args.get("interval_sec")
+        if not isinstance(interval, int) or interval < 60:
+            return _err("interval_sec must be integer >= 60")
+        fields["interval_sec"] = interval
+
+    if not fields:
+        return _err("нечего менять — передай хотя бы одно поле")
+
+    await db_module.update_watch_fields(watch_id, fields)
+    fresh = await db_module.get_watch(watch_id)
+    # перезапуск поллера с новыми параметрами
+    await scheduler.cancel_watch(watch_id)
+    await scheduler.start_watch(fresh)
+
+    return json.dumps({"updated": {
+        "id": fresh["id"],
+        "autobook": fresh["autobook"],
+        "date": fresh["date"],
+        "time_from": fresh["time_from"],
+        "time_to": fresh["time_to"],
+        "pref_time_from": fresh["pref_time_from"],
+        "pref_time_to": fresh["pref_time_to"],
+        "pickup_stop": fresh["pickup_stop"],
+        "dropoff_stop": fresh["dropoff_stop"],
+        "interval_sec": fresh["interval_sec"],
+    }}, ensure_ascii=False)
+
+
 async def _tool_stop_watch(args: dict, ctx: ToolContext) -> str:
     wid = args.get("watch_id")
     if not isinstance(wid, int):
@@ -1055,6 +1199,7 @@ async def _tool_generate_sessions_report(args: dict, ctx: ToolContext) -> str:
 _HANDLERS = {
     "list_watches": _tool_list_watches,
     "create_watch": _tool_create_watch,
+    "update_watch": _tool_update_watch,
     "stop_watch": _tool_stop_watch,
     "stop_all_watches": _tool_stop_all_watches,
     "check_trips_now": _tool_check_trips_now,

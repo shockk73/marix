@@ -473,6 +473,26 @@ async def get_watch(watch_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+_WATCH_UPDATABLE_FIELDS = {
+    "autobook", "pref_time_from", "pref_time_to", "pickup_stop",
+    "dropoff_stop", "time_from", "time_to", "date", "interval_sec",
+}
+
+
+async def update_watch_fields(watch_id: int, fields: dict) -> None:
+    keys = [k for k in fields if k in _WATCH_UPDATABLE_FIELDS]
+    if not keys:
+        return
+    sets = ", ".join(f"{k} = ?" for k in keys)
+    values = [fields[k] for k in keys]
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            f"UPDATE watches SET {sets} WHERE id = ?",
+            (*values, watch_id),
+        )
+        await conn.commit()
+
+
 async def set_watch_autobook(watch_id: int, mode: str) -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(

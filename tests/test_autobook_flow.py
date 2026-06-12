@@ -657,6 +657,88 @@ async def test_list_all_watches_admin_only(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
+async def test_update_watch_toggles_autobook_and_restarts(tmp_db, fake_booker, monkeypatch):
+    started, cancelled = [], []
+
+    async def rec_start(w):
+        started.append(w["id"])
+
+    async def rec_cancel(wid):
+        cancelled.append(wid)
+
+    monkeypatch.setattr(scheduler, "start_watch", rec_start)
+    monkeypatch.setattr(scheduler, "cancel_watch", rec_cancel)
+
+    await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
+    watch = await _mk_watch_row(autobook="off", goal_id="g30")
+    ctx = ToolContext(user_id=1)
+
+    # off -> auto (с живой проверкой кредов)
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": watch["id"], "autobook": "auto"}, ctx))
+    assert out["updated"]["autobook"] == "auto"
+    assert (await db_module.get_watch(watch["id"]))["autobook"] == "auto"
+    assert fake_booker.verify_calls == ["+375 (29) 177-62-96"]
+    assert cancelled == [watch["id"]] and started == [watch["id"]]
+
+    # auto -> off (без проверки кредов)
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": watch["id"], "autobook": "off"}, ctx))
+    assert out["updated"]["autobook"] == "off"
+    assert len(fake_booker.verify_calls) == 1
+
+    # невалидные креды при включении
+    fake_booker.verify_error = InvalidCredentials("bad")
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": watch["id"], "autobook": "auto"}, ctx))
+    assert "error" in out
+    fake_booker.verify_error = None
+
+    # чужая/несуществующая слежка
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": 9999, "autobook": "off"}, ctx))
+    assert "error" in out
+
+
+@pytest.mark.asyncio
+async def test_update_watch_pref_and_stops(tmp_db, fake_scheduler, fake_booker):
+    watch = await _mk_watch_row(autobook="off", goal_id="g31",
+                                time_from="10:00", time_to="20:00")
+    ctx = ToolContext(user_id=1)
+
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": watch["id"],
+        "pref_time_from": "14:00", "pref_time_to": "15:00",
+        "pickup_stop": "ДРУГАЯ"}, ctx))
+    assert out["updated"]["pref_time_from"] == "14:00"
+    assert out["updated"]["pickup_stop"] == "ДРУГАЯ"
+
+    # pref вне окна
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": watch["id"],
+        "pref_time_from": "08:00", "pref_time_to": "09:00"}, ctx))
+    assert "error" in out
+
+    # очистка пустыми строками
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": watch["id"],
+        "pref_time_from": "", "pref_time_to": "",
+        "pickup_stop": ""}, ctx))
+    assert out["updated"]["pref_time_from"] is None
+    assert out["updated"]["pickup_stop"] is None
+
+    # сужение окна, при котором pref вылетел бы — pref уже очищен, ок
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": watch["id"], "time_from": "12:00", "time_to": "16:00"}, ctx))
+    assert out["updated"]["time_from"] == "12:00"
+
+    # пустой апдейт
+    out = json.loads(await dispatch_tool("update_watch", {
+        "watch_id": watch["id"]}, ctx))
+    assert "error" in out
+
+
+@pytest.mark.asyncio
 async def test_create_watch_default_interval_60(tmp_db, fake_scheduler):
     ctx = ToolContext(user_id=1)
     out = json.loads(await dispatch_tool("create_watch", {
