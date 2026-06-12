@@ -140,6 +140,44 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "show_screen",
+            "description": (
+                "Показать экран: markdown-текст + сетка inline-кнопок (до 8 рядов "
+                "по до 4 кнопки). Клик по кнопке вернёт её value как ответ "
+                "пользователя. Используй для выбора из конечного набора: даты, "
+                "окна времени, интервалы, подтверждения, карточки слежек с "
+                "действиями. Для свободного ввода НЕ используй."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string",
+                             "description": "Markdown-текст экрана"},
+                    "buttons": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "description": "Ряды кнопок: до 8 рядов, в ряду до 4 кнопок",
+                        "items": {
+                            "type": "array",
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "value": {"type": "string"},
+                                },
+                                "required": ["label", "value"],
+                            },
+                        },
+                    },
+                },
+                "required": ["text", "buttons"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_atlas_proxy_status",
             "description": (
                 "Показать безопасный статус Atlas proxy: включён ли proxy, "
@@ -535,7 +573,7 @@ _HANDLERS = {
 
 async def dispatch_tool(name: str, args: dict, ctx: ToolContext) -> str:
     """Запускает tool и возвращает JSON-строку для tool_result.
-    ask_user НЕ обрабатывается здесь — это делает agent."""
+    ask_user и show_screen НЕ обрабатываются здесь — это делает agent."""
     handler = _HANDLERS.get(name)
     if handler is None:
         return _err(f"Unknown tool: {name}")

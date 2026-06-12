@@ -42,6 +42,7 @@ _TOOL_THINKING_LABELS = {
     "list_self_callbacks": "Смотрю отложенные callback-и…",
     "create_invite": "Создаю инвайт…",
     "list_invites": "Смотрю инвайты…",
+    "show_screen": "Собираю экран…",
 }
 
 
@@ -294,6 +295,27 @@ class LLMAgent:
         })
         return {"role": "user", "content": parts}
 
+    async def _collect_user_state(self, user_id: int, role: str) -> dict:
+        """Срез состояния юзера для системного промпта (state-awareness)."""
+        watches = await db_module.get_user_watches(user_id)
+        statuses = await db_module.get_watch_statuses([w["id"] for w in watches])
+        callbacks = await db_module.get_user_agent_callbacks(user_id)
+        return {
+            "role": role,
+            "watches": [{
+                "id": w["id"], "provider": w["provider"],
+                "direction": w["direction"], "date": w["date"],
+                "time_from": w["time_from"], "time_to": w["time_to"],
+                "interval_sec": w["interval_sec"],
+                "execution": statuses.get(w["id"]) or {},
+            } for w in watches],
+            "callbacks": [{
+                "id": cb["id"],
+                "run_at_iso": datetime.fromtimestamp(
+                    cb["run_at"], tz=_MSK).isoformat(),
+            } for cb in callbacks],
+        }
+
     async def _send_markdown_message(
         self,
         user_id: int,
@@ -326,9 +348,11 @@ class LLMAgent:
             try:
                 rows = await db_module.get_recent_chat_messages(user_id, LLM_HISTORY_SIZE)
                 stored_name = await db_module.get_user_name(user_id)
+                user_state = await self._collect_user_state(user_id, role)
                 messages = [{"role": "system",
                              "content": build_system_prompt(
                                  now=self._now(), user_name=stored_name,
+                                 user_state=user_state,
                              )}]
                 messages.extend(to_openai_messages(rows))
                 if _override_last_user is not None:
@@ -405,6 +429,10 @@ class LLMAgent:
                     await self._handle_ask_user(user_id, tc_id, args)
                     ask_user_pending = True
                     break
+                elif name == "show_screen":
+                    if await self._handle_screen(user_id, tc_id, args):
+                        ask_user_pending = True
+                        break
                 else:
                     result = await dispatch_tool(name, args, ctx)
                     await db_module.insert_chat_message(
@@ -442,3 +470,59 @@ class LLMAgent:
             options_json=json.dumps(options, ensure_ascii=False),
             message_id=sent.message_id,
         )
+
+    async def _handle_screen(self, user_id: int, tool_call_id: str, args: dict) -> bool:
+        """Рендерит экран show_screen. False — аргументы невалидны, в историю
+        записан tool-error и turn продолжается (модель переделает)."""
+        text = str(args.get("text") or "").strip()
+        rows_in = args.get("buttons")
+        error = None
+        if not text:
+            error = "show_screen: text must be a non-empty string"
+        elif not isinstance(rows_in, list) or not rows_in:
+            error = "show_screen: buttons must be a non-empty array of rows"
+        elif len(rows_in) > 8:
+            error = "show_screen: max 8 rows"
+        else:
+            for row in rows_in:
+                if not isinstance(row, list) or not row:
+                    error = "show_screen: each row must be a non-empty array"
+                    break
+                if len(row) > 4:
+                    error = "show_screen: max 4 buttons per row"
+                    break
+                for btn in row:
+                    if (not isinstance(btn, dict)
+                            or not str(btn.get("label") or "").strip()
+                            or not str(btn.get("value") or "").strip()):
+                        error = "show_screen: each button needs label and value"
+                        break
+                if error:
+                    break
+        if error:
+            await db_module.insert_chat_message(
+                user_id, "tool", content=json.dumps({"error": error}),
+                tool_call_id=tool_call_id,
+            )
+            return False
+
+        flat_values: list[str] = []
+        kb_rows: list[list[InlineKeyboardButton]] = []
+        for row in rows_in:
+            kb_row = []
+            for btn in row:
+                kb_row.append(InlineKeyboardButton(
+                    text=str(btn["label"])[:64],
+                    callback_data=f"ai:{len(flat_values)}",
+                ))
+                flat_values.append(str(btn["value"]))
+            kb_rows.append(kb_row)
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+        sent = await self._send_markdown_message(user_id, text, reply_markup=kb)
+        await db_module.set_pending_tool_call(
+            user_id=user_id, tool_call_id=tool_call_id,
+            tool_name="show_screen",
+            options_json=json.dumps(flat_values, ensure_ascii=False),
+            message_id=sent.message_id,
+        )
+        return True

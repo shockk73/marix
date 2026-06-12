@@ -7,15 +7,16 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, TelegramObject,
     InlineKeyboardMarkup, InlineKeyboardButton,
+    KeyboardButton, ReplyKeyboardMarkup,
 )
 from datetime import datetime
 
 from config import AUTH_CODE
 from db import (
     MAX_AUTH_ATTEMPTS,
-    authorize_user, create_watch, get_user_watches, increment_failed_attempts,
-    is_authorized, is_banned, set_user_role, stop_watch as db_stop_watch,
-    use_invite,
+    authorize_user, create_watch, get_user_role, get_user_watches,
+    increment_failed_attempts, is_authorized, is_banned, set_user_role,
+    stop_watch as db_stop_watch, use_invite,
 )
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
@@ -43,11 +44,32 @@ WELCOME_AFTER_INVITE = (
 ADMIN_GREETING = "Ты админ. Напиши «дай инвайт», чтобы пригласить человека."
 INVITE_REJECT = ("Ссылка не работает или уже использована. "
                  "Попроси новую у того, кто тебя пригласил.")
+ONBOARDING_TRIGGER = ("[новый пользователь вошёл по инвайту — поздоровайся "
+                      "и покажи стартовый экран]")
+
+BTN_WATCH = "🔍 Следить за местами"
+BTN_LIST = "📋 Мои слежки"
+BTN_HELP = "❓ Что ты умеешь"
+BTN_ADMIN = "🛠 Админка"
 
 
-async def handle_unauthorized_message(user_id: int, text: str) -> tuple[str, bool] | None:
-    """Возвращает (ответ, авторизован_ли) или None — стандартный отказ.
-    Подбор инвайт-токена НЕ инкрементит счётчик бана, подбор /auth — да."""
+def main_reply_kb(role: str | None) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text=BTN_WATCH), KeyboardButton(text=BTN_LIST)],
+        [KeyboardButton(text=BTN_HELP)],
+    ]
+    if role == "admin":
+        rows[1].append(KeyboardButton(text=BTN_ADMIN))
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True,
+                               is_persistent=True)
+
+
+async def handle_unauthorized_message(
+    user_id: int, text: str,
+) -> tuple[str, bool, bool] | None:
+    """Возвращает (ответ, авторизован_ли, вошёл_ли_по_инвайту) или None —
+    стандартный отказ. Подбор инвайт-токена НЕ инкрементит счётчик бана,
+    подбор /auth — да."""
     text = text.strip()
     if text.startswith("/start"):
         parts = text.split(maxsplit=1)
@@ -55,24 +77,24 @@ async def handle_unauthorized_message(user_id: int, text: str) -> tuple[str, boo
         if not token:
             return None
         if await use_invite(token, user_id):
-            return (WELCOME_AFTER_INVITE, True)
-        return (INVITE_REJECT, False)
+            return (WELCOME_AFTER_INVITE, True, True)
+        return (INVITE_REJECT, False, False)
     if text == AUTH_CODE:
         await authorize_user(user_id, role="admin")
-        return (ADMIN_GREETING, True)
+        return (ADMIN_GREETING, True, False)
     if text.startswith("/auth"):
         parts = text.split(maxsplit=1)
         code = parts[1].strip() if len(parts) > 1 else ""
         if not code:
-            return ("Использование: /auth <код>", False)
+            return ("Использование: /auth <код>", False, False)
         if code == AUTH_CODE:
             await authorize_user(user_id, role="admin")
-            return (ADMIN_GREETING, True)
+            return (ADMIN_GREETING, True, False)
         failed = await increment_failed_attempts(user_id)
         remaining = MAX_AUTH_ATTEMPTS - failed
         if remaining <= 0:
-            return ("Неверный код. Вы заблокированы.", False)
-        return (f"Неверный код. Осталось попыток: {remaining}", False)
+            return ("Неверный код. Вы заблокированы.", False, False)
+        return (f"Неверный код. Осталось попыток: {remaining}", False, False)
     return None
 
 
@@ -96,12 +118,21 @@ class AuthMiddleware(BaseMiddleware):
         if isinstance(event, Message) and event.text:
             result = await handle_unauthorized_message(user.id, event.text)
             if result is not None:
-                reply, authorized = result
-                if authorized:
-                    state: FSMContext | None = data.get("state")
-                    if state is not None:
-                        await state.clear()
-                await event.answer(reply)
+                reply, authorized, invited = result
+                if not authorized:
+                    await event.answer(reply)
+                    return None
+                state: FSMContext | None = data.get("state")
+                if state is not None:
+                    await state.clear()
+                role = await get_user_role(user.id)
+                await event.answer(reply, reply_markup=main_reply_kb(role))
+                if invited and _agent is not None:
+                    await _agent.run_turn(
+                        user_id=user.id,
+                        text=ONBOARDING_TRIGGER,
+                        user_name=_user_display_name(user),
+                    )
                 return None
 
         if isinstance(event, Message):
@@ -160,11 +191,11 @@ def _directions_kb(provider_keys: list[str]) -> InlineKeyboardMarkup:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
+    role = await get_user_role(message.from_user.id)
     await message.answer(
-        "Привет! Слежу за местами в маршрутках.\n\n"
-        "/watch — создать отслеживание\n"
-        "/list — активные задачи\n"
-        "/stop <id> — остановить задачу"
+        "Привет! Слежу за местами в маршрутках. Просто напиши, что нужно.\n\n"
+        "Команды-фоллбек: /watch, /list, /stop <id>",
+        reply_markup=main_reply_kb(role),
     )
 
 

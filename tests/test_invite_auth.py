@@ -68,37 +68,40 @@ async def test_authorize_admin_upgrades_but_never_downgrades(tmp_db):
 
 async def test_unauthorized_valid_invite(tmp_db):
     token = await db_module.create_invite(1)
-    reply, authorized = await handle_unauthorized_message(50, f"/start {token}")
+    reply, authorized, invited = await handle_unauthorized_message(50, f"/start {token}")
     assert authorized is True
+    assert invited is True
     assert reply == WELCOME_AFTER_INVITE
     assert await db_module.is_authorized(50)
 
 
 async def test_unauthorized_bad_invite_no_ban(tmp_db):
-    reply, authorized = await handle_unauthorized_message(50, "/start badtoken")
+    reply, authorized, invited = await handle_unauthorized_message(50, "/start badtoken")
     assert authorized is False
+    assert invited is False
     assert reply == INVITE_REJECT
     assert await db_module.get_failed_attempts(50) == 0
 
 
 async def test_unauthorized_auth_code_plain_text_makes_admin(tmp_db, monkeypatch):
     monkeypatch.setattr("handlers.AUTH_CODE", "s3cret")
-    reply, authorized = await handle_unauthorized_message(50, "s3cret")
+    reply, authorized, invited = await handle_unauthorized_message(50, "s3cret")
     assert authorized is True
+    assert invited is False
     assert reply == ADMIN_GREETING
     assert await db_module.get_user_role(50) == "admin"
 
 
 async def test_unauthorized_auth_command_makes_admin(tmp_db, monkeypatch):
     monkeypatch.setattr("handlers.AUTH_CODE", "s3cret")
-    reply, authorized = await handle_unauthorized_message(50, "/auth s3cret")
+    reply, authorized, _ = await handle_unauthorized_message(50, "/auth s3cret")
     assert authorized is True
     assert await db_module.get_user_role(50) == "admin"
 
 
 async def test_unauthorized_wrong_auth_code_increments(tmp_db, monkeypatch):
     monkeypatch.setattr("handlers.AUTH_CODE", "s3cret")
-    reply, authorized = await handle_unauthorized_message(50, "/auth wrong")
+    reply, authorized, _ = await handle_unauthorized_message(50, "/auth wrong")
     assert authorized is False
     assert "Осталось попыток" in reply
     assert await db_module.get_failed_attempts(50) == 1

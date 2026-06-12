@@ -36,7 +36,7 @@ def test_tool_schemas_contains_all_expected_names():
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
     assert names == {
         "list_watches", "create_watch", "stop_watch",
-        "stop_all_watches", "check_trips_now", "ask_user",
+        "stop_all_watches", "check_trips_now", "ask_user", "show_screen",
         "get_atlas_proxy_status", "set_atlas_proxy_target",
         "schedule_self_callback", "list_self_callbacks",
     }

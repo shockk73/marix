@@ -3,10 +3,14 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-12-baranovichi-v1"
+LLM_SESSION_VERSION = "2026-06-12-llm-first-ux-v1"
 
 
-def build_system_prompt(now: datetime, user_name: str | None) -> str:
+def build_system_prompt(
+    now: datetime,
+    user_name: str | None,
+    user_state: dict | None = None,
+) -> str:
     providers_lines = [
         f"  - {key} ({p.display_name}): {', '.join(p.directions)}"
         for key, p in PROVIDERS.items()
@@ -24,6 +28,32 @@ def build_system_prompt(now: datetime, user_name: str | None) -> str:
     ]
     if user_name:
         parts.append(f"Имя собеседника: {user_name}. Обращайся по имени, если уместно.")
+    if user_state:
+        parts.append("")
+        parts.append(f"Роль пользователя: {user_state.get('role', 'user')}.")
+        watches = user_state.get("watches") or []
+        if watches:
+            parts.append("Активные слежки пользователя:")
+            for w in watches:
+                status = w.get("execution") or {}
+                if status.get("consecutive_errors"):
+                    s = (f"ОШИБКИ x{status['consecutive_errors']}: "
+                         f"{(status.get('last_error') or '')[:120]}")
+                else:
+                    s = status.get("status") or "not_started"
+                parts.append(
+                    f"  - #{w['id']} {w['provider']} {w['direction']} {w['date']} "
+                    f"{w['time_from']}–{w['time_to']} каждые {w['interval_sec']}с; "
+                    f"статус: {s}"
+                )
+        else:
+            parts.append("Активных слежек у пользователя нет.")
+        callbacks = user_state.get("callbacks") or []
+        if callbacks:
+            parts.append(
+                f"Отложенных self-callback-ов: {len(callbacks)}, "
+                f"ближайший: {callbacks[0]['run_at_iso']}."
+            )
     parts += [
         "",
         "Доступные провайдеры (используй ключи в tool calls):",
@@ -58,5 +88,24 @@ def build_system_prompt(now: datetime, user_name: str | None) -> str:
         "Ключи провайдеров, направлений, id задач и значения с подчёркиваниями всегда пиши в `коде`, "
         "например `avto_slava`, `mg_bobr`, `/stop 12`. Если сомневаешься — пиши обычным текстом без разметки.",
         "10. Отвечай на русском, кратко и по делу.",
+        "11. Тебе виден срез состояния пользователя выше (роль, слежки, статусы, "
+        "callback-и) — это твоя память о том, где находится пользователь. Если у "
+        "слежки ошибки подряд — упомяни это при любом обращении. После успешного "
+        "действия подскажи логичный следующий шаг. Не повторяй подсказки каждое "
+        "сообщение.",
+        "12. show_screen строит экран с сеткой кнопок — используй для выбора из "
+        "конечного набора: дата (ближайшие 7 дней), окно времени (🌅 Утро 05:00–12:00 / "
+        "🌞 День 12:00–17:00 / 🌆 Вечер 17:00–23:00 / Весь день), интервал (1/2/5/10 мин), "
+        "подтверждения, карточки слежек с кнопкой остановки (value: «останови слежку N»). "
+        "Для свободного ввода экран не строй; пользователь всегда может ответить текстом. "
+        "ask_user — для простых вопросов одним столбиком.",
+        "13. Сценарий «создать слежку»: провайдер(ы) → направление → дата → окно "
+        "времени → интервал → create_watch. Недостающее спрашивай экранами по одному шагу. "
+        "Сценарий «мои слежки»: list_watches → краткие карточки + экран с кнопками остановки.",
+        "14. Кнопки клавиатуры пользователя: «🔍 Следить за местами» — сценарий создания "
+        "слежки; «📋 Мои слежки» — сценарий списка; «❓ Что ты умеешь» — краткий обзор "
+        "возможностей + стартовый экран; «🛠 Админка» (только админ) — инвайты, отчёты. "
+        "Сообщение «[новый пользователь вошёл по инвайту…]» — онбординг: поздоровайся, "
+        "двумя фразами объясни, что умеешь, покажи стартовый экран show_screen.",
     ]
     return "\n".join(parts)
