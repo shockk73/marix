@@ -22,6 +22,7 @@ class FakeBot:
     sent: list = None
     edited: list = None
     documents: list = None
+    actions: list = None
     _next_msg_id: int = 1000
     fail_next_markdown: bool = False
 
@@ -29,6 +30,7 @@ class FakeBot:
         self.sent = []
         self.edited = []
         self.documents = []
+        self.actions = []
 
     async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
         if self.fail_next_markdown and parse_mode == "Markdown":
@@ -48,6 +50,9 @@ class FakeBot:
 
     async def send_document(self, chat_id, document):
         self.documents.append({"chat_id": chat_id, "document": document})
+
+    async def send_chat_action(self, chat_id, action):
+        self.actions.append({"chat_id": chat_id, "action": action})
 
 
 @pytest.fixture

@@ -341,6 +341,34 @@ async def test_plain_json_in_text_left_untouched(tmp_db, fake_bot, fake_schedule
     assert await db_module.get_pending_tool_call(1) is None
 
 
+@pytest.mark.asyncio
+async def test_typing_action_sent_while_model_thinks(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": "ок"})
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="привет", user_name=None)
+
+    assert {"chat_id": 1, "action": "typing"} in fake_bot.actions
+
+
+@pytest.mark.asyncio
+async def test_form_click_leaves_chosen_trace(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value=_form_tool_call(FORM_QUESTIONS))
+    agent = _mk_agent(fake_bot, client)
+    await agent.run_turn(user_id=1, text="следи", user_name=None)
+
+    await agent.answer_form_option(1, 0, 0)
+
+    # клавиатура вопроса заменена следом выбора, а не удалена
+    edited = fake_bot.edited[-1]
+    kb = edited["reply_markup"].inline_keyboard
+    assert kb[0][0].text == "✅ завтра"
+    assert kb[0][0].callback_data == "chosen"
+
+
 def test_thinking_label_carries_call_context():
     from llm.agent import _thinking_label
     label = _thinking_label("check_trips_now", {

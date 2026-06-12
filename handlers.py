@@ -23,7 +23,7 @@ from db import (
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 from scheduler import start_watch, cancel_watch
-from llm.agent import LLMAgent
+from llm.agent import LLMAgent, chosen_markup
 
 router = Router()
 
@@ -391,6 +391,29 @@ def _mask_phone(phone: str) -> str:
     return f"{phone[:4]}…{phone[-2:]}" if len(phone) >= 6 else phone
 
 
+def _clicked_label(cb: CallbackQuery) -> str | None:
+    """Текст нажатой кнопки из клавиатуры сообщения."""
+    try:
+        for row in cb.message.reply_markup.inline_keyboard:
+            for button in row:
+                if button.callback_data == cb.data:
+                    return button.text
+    except AttributeError:
+        pass
+    return None
+
+
+async def _mark_chosen(cb: CallbackQuery, label: str | None) -> None:
+    """Заменяет клавиатуру следом выбора — что нажал юзер, остаётся видно."""
+    try:
+        if label:
+            await cb.message.edit_reply_markup(reply_markup=chosen_markup(label))
+        else:
+            await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
 def _watch_line(w: dict, creds_connected: bool = False) -> str:
     p = PROVIDERS[w["provider"]]
     dir_label = DIRECTION_LABELS[w["direction"]]
@@ -590,12 +613,14 @@ async def on_ai_callback(cb: CallbackQuery):
         return
 
     selected = options[idx]
-    try:
-        await cb.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
+    await _mark_chosen(cb, _clicked_label(cb) or selected)
     await cb.answer()
     await _agent.continue_turn(user_id=user_id, selected_option=selected)
+
+
+@router.callback_query(F.data == "chosen")
+async def on_chosen_noop(cb: CallbackQuery):
+    await cb.answer("Уже выбрано ✓")
 
 
 @router.callback_query(F.data.startswith("aim:"))
@@ -640,10 +665,7 @@ async def on_ai_confirm(cb: CallbackQuery):
         await cb.answer("Вопрос устарел.", show_alert=False)
         return
     approved = cb.data == "aic:yes"
-    try:
-        await cb.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
+    await _mark_chosen(cb, "Да" if approved else "Нет")
     await cb.answer("Выполняю…" if approved else "Отменил.")
     await _agent.resolve_confirmation(user_id=cb.from_user.id, approved=approved)
 
@@ -688,10 +710,7 @@ async def on_booking_button(cb: CallbackQuery):
             )
             return
 
-    try:
-        await cb.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
+    await _mark_chosen(cb, _clicked_label(cb))
     await cb.answer("Бронирую…")
     _, text, _ = await execute_booking(
         user_id=user_id,

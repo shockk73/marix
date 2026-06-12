@@ -48,6 +48,13 @@ def _short_date(date: str) -> str:
     return f"{date[8:10]}.{date[5:7]}" if len(date) == 10 else date
 
 
+def chosen_markup(label: str) -> InlineKeyboardMarkup:
+    """Клавиатура-след после клика: выбор юзера остаётся виден в чате."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"✅ {label}"[:64], callback_data="chosen"),
+    ]])
+
+
 def _thinking_label(name: str, args: dict) -> str | None:
     """Человекочитаемый лейбл с контекстом вызова — юзер видит, ЧТО именно
     проверяется/бронируется, а не безликое «Проверяю рейсы…»."""
@@ -487,6 +494,16 @@ class LLMAgent:
             } for b in bookings],
         }
 
+    async def _typing(self, user_id: int) -> None:
+        """Статус «печатает…» в TG, пока модель думает."""
+        sender = getattr(self._bot, "send_chat_action", None)
+        if sender is None:
+            return
+        try:
+            await sender(chat_id=user_id, action="typing")
+        except Exception as e:
+            logger.debug("typing action failed: %s", e)
+
     async def _send_markdown_message(
         self,
         user_id: int,
@@ -534,6 +551,7 @@ class LLMAgent:
                             messages[i] = _override_last_user
                             break
                     _override_last_user = None
+                await self._typing(user_id)
                 msg = await self._client.chat_completion(
                     messages=messages, tools=build_tools_for_role(role),
                 )
@@ -552,6 +570,7 @@ class LLMAgent:
                             "кнопками. Никаких мета-комментариев про кнопки и "
                             "свои возможности. Риторический вопрос убери.")},
                     ]
+                    await self._typing(user_id)
                     msg = await self._client.chat_completion(
                         messages=retry_messages, tools=build_tools_for_role(role),
                     )
@@ -755,9 +774,10 @@ class LLMAgent:
         message_ids = payload.get("message_ids") or []
         if idx < len(message_ids):
             try:
+                # вместо удаления кнопок оставляем след выбора
                 await self._bot.edit_message_reply_markup(
                     chat_id=user_id, message_id=message_ids[idx],
-                    reply_markup=None,
+                    reply_markup=chosen_markup(answer),
                 )
             except Exception as e:
                 logger.debug("Form keyboard strip failed: %s", e)
