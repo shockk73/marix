@@ -342,6 +342,36 @@ async def test_plain_json_in_text_left_untouched(tmp_db, fake_bot, fake_schedule
 
 
 @pytest.mark.asyncio
+async def test_empty_response_retried_then_sent(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=[
+        {"role": "assistant", "content": None},          # ризонинг съел контент
+        {"role": "assistant", "content": "Остановил все слежки."},
+    ])
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="отмени все", user_name=None)
+
+    assert client.chat_completion.call_count == 2
+    assert fake_bot.sent[-1]["text"] == "Остановил все слежки."
+
+
+@pytest.mark.asyncio
+async def test_empty_response_twice_falls_back_to_done(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": ""})
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="отмени все", user_name=None)
+
+    # тишина запрещена: после неудачного ретрая уходит фоллбек
+    assert fake_bot.sent[-1]["text"] == "Готово ✅"
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assert msgs[-1]["content"] == "Готово ✅"
+
+
+@pytest.mark.asyncio
 async def test_typing_action_sent_while_model_thinks(tmp_db, fake_bot, fake_scheduler):
     client = AsyncMock()
     client.chat_completion = AsyncMock(return_value={

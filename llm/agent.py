@@ -575,6 +575,21 @@ class LLMAgent:
                         messages=retry_messages, tools=build_tools_for_role(role),
                     )
                     msg = _salvage_inline_tool_call(msg)
+                if (not (msg.get("tool_calls") or [])
+                        and not (msg.get("content") or "").strip()):
+                    # Пустой ответ (ризонинг съел контент) — молчать нельзя,
+                    # одна принудительная попытка сформулировать ответ.
+                    retry_messages = messages + [
+                        {"role": "system", "content": (
+                            "Твой ответ пуст. Напиши пользователю короткое "
+                            "подтверждение результата или ответ — 1–2 "
+                            "предложения, без вопросов.")},
+                    ]
+                    await self._typing(user_id)
+                    msg = await self._client.chat_completion(
+                        messages=retry_messages, tools=build_tools_for_role(role),
+                    )
+                    msg = _salvage_inline_tool_call(msg)
             except httpx.HTTPError as e:
                 if (
                     _raise_client_errors
@@ -598,8 +613,10 @@ class LLMAgent:
             content = msg.get("content")
 
             if not tool_calls:
+                if not (content or "").strip():
+                    content = "Готово ✅"  # тишина запрещена
                 await db_module.insert_chat_message(user_id, "assistant", content=content)
-                if content and content.strip() not in sent_texts:
+                if content.strip() not in sent_texts:
                     sent_texts.add(content.strip())
                     await self._send_markdown_message(user_id, content)
                 await db_module.prune_chat_messages(user_id, LLM_HISTORY_SIZE * 2)

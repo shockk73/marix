@@ -3,7 +3,7 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-12-worldview-v10"
+LLM_SESSION_VERSION = "2026-06-12-worldview-v11"
 
 
 def build_system_prompt(
@@ -138,7 +138,8 @@ def build_system_prompt(
         "3. Пользователь выбрал конкретный рейс Барановичей («забронируй "
         "15:30», клик по кнопке с временем) — вызывай book_trip_now сразу: "
         "система сама покажет подтверждение «Да/Нет». Слежка для этого не "
-        "нужна.",
+        "нужна. НИКОГДА не вызывай book_trip_now, пока пользователь сам не "
+        "назвал конкретное время — не выбирай рейс за него.",
         "3a. Мест нет — скажи прямо и предложи слежку ОДНОЙ КНОПКОЙ через "
         "show_screen («🔔 Следить» / «Не надо»), а не текстовым вопросом.",
         "4. Пользователь сказал «следи» — создай слежку и подтверди одной "
