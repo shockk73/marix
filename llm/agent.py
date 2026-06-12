@@ -436,7 +436,14 @@ class LLMAgent:
                         ask_user_pending = True
                         break
                 else:
-                    result = await dispatch_tool(name, args, ctx)
+                    try:
+                        result = await dispatch_tool(name, args, ctx)
+                    except Exception as e:
+                        logger.exception("Tool %s crashed: %s", name, e)
+                        result = json.dumps(
+                            {"error": f"Tool crashed: {type(e).__name__}: {e}"},
+                            ensure_ascii=False,
+                        )
                     await db_module.insert_chat_message(
                         user_id, "tool", content=result, tool_call_id=tc_id,
                     )

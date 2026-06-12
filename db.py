@@ -135,6 +135,8 @@ async def _ensure_column(conn, table: str, ddl_column: str) -> None:
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA busy_timeout=5000")
         await conn.execute(_CREATE_TABLE)
         await conn.execute(_CREATE_AUTHORIZED)
         await conn.execute(_CREATE_AUTH_ATTEMPTS)
