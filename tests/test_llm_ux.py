@@ -252,6 +252,65 @@ async def test_ask_user_form_invalid_returns_error_to_model(tmp_db, fake_bot, fa
     assert "2..4 questions" in tool_msgs[0]["content"]
 
 
+BROKEN_INLINE_SCREEN = """Если хотите, могу поставить слежку на все доступные рейсы — если появятся варианты удобнее, сразу напишу.
+
+}{
+  "buttons":
+    [
+      { "label": "🔔 Следить за местами", "value": "watch" },
+      { "label": "Не надо", "value": "no" }
+
+  ],
+  "text": "Поставить слежку на поездки?"
+}"""
+
+
+@pytest.mark.asyncio
+async def test_inline_screen_json_salvaged_into_buttons(tmp_db, fake_bot, fake_scheduler):
+    # точная репродукция бага: модель вывалила JSON кнопок текстом
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant", "content": BROKEN_INLINE_SCREEN})
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="есть места?", user_name=None)
+
+    # юзер не видит сырой JSON
+    assert all('"buttons"' not in m["text"] for m in fake_bot.sent)
+    assert all("}{" not in m["text"] for m in fake_bot.sent)
+    # экран отрисован настоящими кнопками
+    screen = next(m for m in fake_bot.sent if m["reply_markup"] is not None)
+    assert "Поставить слежку" in screen["text"]
+    kb = screen["reply_markup"].inline_keyboard
+    assert kb[0][0].text == "🔔 Следить за местами"
+    pending = await db_module.get_pending_tool_call(1)
+    assert pending is not None
+    assert json.loads(pending["options_json"]) == ["watch", "no"]
+    # текст-преамбула ушла отдельным сообщением без мусорных скобок
+    preface = fake_bot.sent[0]["text"]
+    assert "слежку на все доступные рейсы" in preface
+    assert not preface.rstrip().endswith("}")
+    # история консистентна: assistant с tool_calls
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assistant = next(m for m in msgs if m["role"] == "assistant")
+    assert assistant["tool_calls"] is not None
+    assert "show_screen" in assistant["tool_calls"]
+
+
+@pytest.mark.asyncio
+async def test_plain_json_in_text_left_untouched(tmp_db, fake_bot, fake_scheduler):
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(return_value={
+        "role": "assistant",
+        "content": 'Настройки такие: {"interval": 60, "mode": "fast"}'})
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.run_turn(user_id=1, text="x", user_name=None)
+
+    assert '{"interval": 60' in fake_bot.sent[-1]["text"]
+    assert await db_module.get_pending_tool_call(1) is None
+
+
 @pytest.mark.asyncio
 async def test_text_question_retried_into_buttons(tmp_db, fake_bot, fake_scheduler):
     client = AsyncMock()

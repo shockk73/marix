@@ -5,6 +5,7 @@ import logging
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
+from uuid import uuid4
 
 import httpx
 from aiogram.exceptions import TelegramBadRequest
@@ -47,6 +48,76 @@ CONFIRM_REQUIRED = {
 }
 
 
+def _find_json_object(content: str, anchor: str) -> tuple[int, int, dict] | None:
+    """Ищет в тексте JSON-объект, содержащий ключ anchor. Возвращает
+    (start, end, data) или None."""
+    idx = content.find(f'"{anchor}"')
+    if idx == -1:
+        return None
+    start = content.rfind("{", 0, idx)
+    while start != -1:
+        depth = 0
+        for i in range(start, len(content)):
+            ch = content[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        data = json.loads(content[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+                    if isinstance(data, dict) and anchor in data:
+                        return (start, i + 1, data)
+                    break
+        start = content.rfind("{", 0, start)
+    return None
+
+
+def _strip_brace_garbage(text: str) -> str:
+    text = text.strip()
+    while text and text[-1] in "{}":
+        text = text[:-1].rstrip()
+    while text and text[0] in "{}":
+        text = text[1:].lstrip()
+    return text
+
+
+def _salvage_inline_tool_call(msg: dict) -> dict:
+    """Модель иногда вываливает аргументы show_screen/ask_user JSON-ом прямо
+    в текст вместо tool call — Telegram кнопки из текста не отрисует.
+    Распознаём блоб, вырезаем из текста и превращаем в настоящий tool call."""
+    if msg.get("tool_calls"):
+        return msg
+    content = msg.get("content") or ""
+    for anchor, tool_name in (("buttons", "show_screen"),
+                              ("options", "ask_user")):
+        found = _find_json_object(content, anchor)
+        if found is None:
+            continue
+        start, end, data = found
+        clean = _strip_brace_garbage(content[:start] + content[end:])
+        if tool_name == "show_screen" and not data.get("text"):
+            data["text"] = "Выбери вариант:"
+        if tool_name == "ask_user" and not data.get("question"):
+            data["question"] = "Выбери вариант:"
+        logger.warning("Salvaged inline %s JSON from model text", tool_name)
+        return {
+            **msg,
+            "content": clean,
+            "tool_calls": [{
+                "id": f"salvaged-{uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(data, ensure_ascii=False),
+                },
+            }],
+        }
+    return msg
+
+
 def _confirm_summary(name: str, args: dict) -> str:
     if name == "stop_watch":
         return f"Остановить слежку #{args.get('watch_id')}?"
@@ -55,8 +126,11 @@ def _confirm_summary(name: str, args: dict) -> str:
     if name == "cancel_booking":
         return f"Отменить бронь #{args.get('booking_id')}?"
     if name == "book_trip_now":
-        return (f"Забронировать рейс {args.get('departure_time')} "
-                f"({args.get('direction')}) на {args.get('date')}?")
+        from providers.base import DIRECTION_LABELS
+        direction = DIRECTION_LABELS.get(args.get("direction"),
+                                         args.get("direction"))
+        return (f"Забронировать рейс {args.get('departure_time')}, "
+                f"{direction}, {args.get('date')}?")
     if name == "delete_credentials":
         return "Отключить аккаунт автоброни (удалить сохранённые креды)?"
     return f"Выполнить действие {name}?"
@@ -418,6 +492,7 @@ class LLMAgent:
                 msg = await self._client.chat_completion(
                     messages=messages, tools=build_tools_for_role(role),
                 )
+                msg = _salvage_inline_tool_call(msg)
                 if (not (msg.get("tool_calls") or [])
                         and (msg.get("content") or "").rstrip().endswith("?")):
                     # Текстовый вопрос без кнопок запрещён — один принудительный
@@ -434,6 +509,7 @@ class LLMAgent:
                     msg = await self._client.chat_completion(
                         messages=retry_messages, tools=build_tools_for_role(role),
                     )
+                    msg = _salvage_inline_tool_call(msg)
             except httpx.HTTPError as e:
                 if (
                     _raise_client_errors
@@ -733,6 +809,10 @@ class LLMAgent:
         записан tool-error и turn продолжается (модель переделает)."""
         text = str(args.get("text") or "").strip()
         rows_in = args.get("buttons")
+        if (isinstance(rows_in, list) and rows_in
+                and all(isinstance(b, dict) for b in rows_in)):
+            # модель прислала плоский список кнопок — по одной в ряд
+            rows_in = [[b] for b in rows_in]
         error = None
         if not text:
             error = "show_screen: text must be a non-empty string"
