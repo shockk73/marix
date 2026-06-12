@@ -90,6 +90,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                     "pref_time_to": {"type": "string",
                                      "description": "HH:MM, конец приоритетного окна"},
+                    "goal_id": {
+                        "type": "string",
+                        "description": (
+                            "Присоединить новые слежки к существующей цели "
+                            "(той же поездке) — возьми goal_id из среза "
+                            "состояния или list_watches. Не указывай для "
+                            "новой поездки: цель создастся сама."
+                        ),
+                    },
                 },
                 "required": ["providers", "direction", "date",
                              "time_from", "time_to", "interval_sec"],
@@ -162,6 +171,44 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["question", "options"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user_form",
+            "description": (
+                "Задать пользователю сразу НЕСКОЛЬКО вопросов (2–4) с "
+                "вариантами ответов — форма. Каждый вопрос придёт отдельным "
+                "сообщением с кнопками; когда пользователь ответит на все, "
+                "ответы вернутся одним результатом. Используй вместо цепочки "
+                "одиночных ask_user, когда не хватает нескольких параметров "
+                "сразу (например дата, окно времени и интервал)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string"},
+                                "options": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 2,
+                                    "maxItems": 8,
+                                },
+                            },
+                            "required": ["question", "options"],
+                        },
+                    },
+                },
+                "required": ["questions"],
             },
         },
     },
@@ -503,6 +550,10 @@ async def _tool_list_watches(args: dict, ctx: ToolContext) -> str:
         "time_from": w["time_from"],
         "time_to": w["time_to"],
         "interval_sec": w["interval_sec"],
+        "autobook": w.get("autobook") or "off",
+        "goal_id": w.get("goal_id"),
+        "pref_time_from": w.get("pref_time_from"),
+        "pref_time_to": w.get("pref_time_to"),
         "execution": _watch_execution_payload(statuses.get(w["id"])),
     } for w in watches]
     return json.dumps({"watches": out}, ensure_ascii=False)
@@ -564,7 +615,21 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
         if not (tf <= pref_from <= pref_to <= tt):
             return _err("приоритетное окно должно лежать внутри основного окна")
 
-    goal_id = uuid4().hex[:12]
+    goal_id = args.get("goal_id")
+    if goal_id is not None:
+        if not isinstance(goal_id, str) or not goal_id:
+            return _err("goal_id must be a non-empty string")
+        existing = await db_module.get_goal_watches(ctx.user_id, goal_id)
+        if not existing:
+            return _err(f"цель {goal_id} не найдена среди активных слежек — "
+                        f"проверь goal_id в list_watches")
+        mismatched = [w for w in existing
+                      if w["direction"] != direction or w["date"] != date_s]
+        if mismatched:
+            return _err("цель объединяет слежки ОДНОЙ поездки: направление и "
+                        "дата должны совпадать с существующими слежками цели")
+    else:
+        goal_id = uuid4().hex[:12]
     created_ids = []
     for p in providers:
         watch_autobook = autobook if p == "baranovichi_express" else "off"

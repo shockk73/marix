@@ -360,6 +360,53 @@ async def test_create_watch_tool_autobook_validation(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
+async def test_create_watch_joins_existing_goal(tmp_db, fake_scheduler):
+    await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
+    ctx = ToolContext(user_id=1)
+    base = {
+        "direction": "mnsk_baran", "date": "2099-06-14",
+        "time_from": "10:00", "time_to": "20:00", "interval_sec": 60,
+    }
+    first = json.loads(await dispatch_tool("create_watch", {
+        **base, "providers": ["baranovichi_express"], "autobook": "auto"}, ctx))
+    goal = first["goal_id"]
+
+    # добавляем провайдера к той же поездке
+    second = json.loads(await dispatch_tool("create_watch", {
+        **base, "providers": ["atlasbus"], "goal_id": goal}, ctx))
+    w = await db_module.get_watch(second["created_ids"][0])
+    assert w["goal_id"] == goal
+    assert len(await db_module.get_goal_watches(1, goal)) == 2
+
+    # несуществующая цель
+    out = json.loads(await dispatch_tool("create_watch", {
+        **base, "providers": ["atlasbus"], "goal_id": "nope"}, ctx))
+    assert "error" in out
+
+    # другая дата — не та поездка
+    out = json.loads(await dispatch_tool("create_watch", {
+        **base, "providers": ["atlasbus"], "goal_id": goal,
+        "date": "2099-06-15"}, ctx))
+    assert "error" in out
+
+
+@pytest.mark.asyncio
+async def test_list_watches_exposes_goal_autobook_pref(tmp_db, fake_scheduler):
+    await db_module.create_watch(
+        user_id=1, provider="baranovichi_express", direction="mnsk_baran",
+        date="2099-06-14", time_from="10:00", time_to="20:00",
+        interval_sec=60, autobook="auto", goal_id="g42",
+        pref_time_from="14:00", pref_time_to="15:00")
+    ctx = ToolContext(user_id=1)
+    out = json.loads(await dispatch_tool("list_watches", {}, ctx))
+    w = out["watches"][0]
+    assert w["autobook"] == "auto"
+    assert w["goal_id"] == "g42"
+    assert w["pref_time_from"] == "14:00"
+    assert w["pref_time_to"] == "15:00"
+
+
+@pytest.mark.asyncio
 async def test_stop_watch_requires_confirmation(tmp_db, fake_bot, fake_scheduler):
     wid = await db_module.create_watch(
         user_id=1, provider="atlasbus", direction="mg_mnsk",

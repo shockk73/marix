@@ -36,6 +36,7 @@ _TOOL_THINKING_LABELS = {
     "stop_all_watches": "Останавливаю все отслеживания…",
     "check_trips_now": "Проверяю рейсы сейчас…",
     "ask_user": "Уточняю…",
+    "ask_user_form": "Уточняю детали…",
     "get_atlas_proxy_status": "Смотрю настройки Atlas proxy…",
     "set_atlas_proxy_target": "Меняю Atlas proxy target…",
     "schedule_self_callback": "Планирую callback…",
@@ -177,18 +178,34 @@ class LLMAgent:
         if pending is None:
             return
         try:
-            await self._bot.edit_message_reply_markup(
-                chat_id=user_id,
-                message_id=pending["message_id"],
-                reply_markup=None,
-            )
-        except Exception as e:
-            logger.debug("Could not strip keyboard from msg %s: %s",
-                         pending["message_id"], e)
+            payload = json.loads(pending["options_json"])
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+
+        message_ids = [pending["message_id"]]
+        cancel_payload: dict[str, Any] = {"canceled": True,
+                                          "reason": "user sent new message"}
+        if isinstance(payload, dict) and payload.get("kind") == "form":
+            message_ids = payload.get("message_ids") or message_ids
+            answers = payload.get("answers") or {}
+            questions = payload.get("questions") or []
+            if answers:
+                cancel_payload["partial_answers"] = {
+                    questions[int(k)]["question"]: v
+                    for k, v in answers.items()
+                    if k.isdigit() and int(k) < len(questions)
+                }
+
+        for mid in message_ids:
+            try:
+                await self._bot.edit_message_reply_markup(
+                    chat_id=user_id, message_id=mid, reply_markup=None,
+                )
+            except Exception as e:
+                logger.debug("Could not strip keyboard from msg %s: %s", mid, e)
         await db_module.insert_chat_message(
             user_id, "tool",
-            content=json.dumps({"canceled": True,
-                                "reason": "user sent new message"}),
+            content=json.dumps(cancel_payload, ensure_ascii=False),
             tool_call_id=pending["tool_call_id"],
         )
         await db_module.delete_pending_tool_call(user_id)
@@ -339,6 +356,7 @@ class LLMAgent:
                 "time_from": w["time_from"], "time_to": w["time_to"],
                 "interval_sec": w["interval_sec"],
                 "autobook": w.get("autobook") or "off",
+                "goal_id": w.get("goal_id"),
                 "pref_time_from": w.get("pref_time_from"),
                 "pref_time_to": w.get("pref_time_to"),
                 "execution": statuses.get(w["id"]) or {},
@@ -357,6 +375,7 @@ class LLMAgent:
                 "id": b["id"], "date": b["date"],
                 "departure_time": b["departure_time"],
                 "direction": b["direction"],
+                "goal_id": b["goal_id"],
             } for b in bookings],
         }
 
@@ -474,6 +493,10 @@ class LLMAgent:
                     await self._handle_ask_user(user_id, tc_id, args)
                     ask_user_pending = True
                     break
+                elif name == "ask_user_form":
+                    if await self._handle_ask_form(user_id, tc_id, args):
+                        ask_user_pending = True
+                        break
                 elif name == "show_screen":
                     if await self._handle_screen(user_id, tc_id, args):
                         ask_user_pending = True
@@ -526,6 +549,113 @@ class LLMAgent:
             options_json=json.dumps(options, ensure_ascii=False),
             message_id=sent.message_id,
         )
+
+    async def _handle_ask_form(self, user_id: int, tool_call_id: str, args: dict) -> bool:
+        """Форма из 2–4 вопросов, каждый отдельным сообщением с кнопками.
+        Ответы копятся в pending; когда есть все — один tool-result.
+        False — аргументы невалидны, в историю ушёл tool-error."""
+        questions = args.get("questions")
+        error = None
+        if not isinstance(questions, list) or not (2 <= len(questions) <= 4):
+            error = "ask_user_form: needs 2..4 questions"
+        else:
+            for q in questions:
+                if not isinstance(q, dict) or not str(q.get("question") or "").strip():
+                    error = "ask_user_form: each item needs question text"
+                    break
+                opts = q.get("options")
+                if not isinstance(opts, list) or not (2 <= len(opts) <= 8):
+                    error = "ask_user_form: each question needs 2..8 options"
+                    break
+        if error:
+            await db_module.insert_chat_message(
+                user_id, "tool", content=json.dumps({"error": error}),
+                tool_call_id=tool_call_id,
+            )
+            return False
+
+        total = len(questions)
+        message_ids: list[int] = []
+        norm_questions: list[dict[str, Any]] = []
+        for qi, q in enumerate(questions):
+            opts = [str(o) for o in q["options"]][:8]
+            rows = [[InlineKeyboardButton(text=opt[:64],
+                                          callback_data=f"aim:{qi}:{oi}")]
+                    for oi, opt in enumerate(opts)]
+            sent = await self._send_markdown_message(
+                user_id,
+                f"({qi + 1}/{total}) {str(q['question'])}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
+            message_ids.append(sent.message_id)
+            norm_questions.append({"question": str(q["question"]),
+                                   "options": opts})
+        await db_module.set_pending_tool_call(
+            user_id=user_id, tool_call_id=tool_call_id,
+            tool_name="ask_user_form",
+            options_json=json.dumps({
+                "kind": "form",
+                "questions": norm_questions,
+                "answers": {},
+                "message_ids": message_ids,
+            }, ensure_ascii=False),
+            message_id=message_ids[0],
+        )
+        return True
+
+    async def answer_form_option(self, user_id: int, q_idx: int, opt_idx: int) -> str:
+        """Клик по кнопке формы. Возвращает stale|dup|recorded|done."""
+        async with self._lock_for(user_id):
+            pending = await db_module.get_pending_tool_call(user_id)
+            if pending is None:
+                return "stale"
+            try:
+                payload = json.loads(pending["options_json"])
+            except (json.JSONDecodeError, TypeError):
+                return "stale"
+            if not isinstance(payload, dict) or payload.get("kind") != "form":
+                return "stale"
+            questions = payload.get("questions") or []
+            if not (0 <= q_idx < len(questions)):
+                return "stale"
+            options = questions[q_idx].get("options") or []
+            if not (0 <= opt_idx < len(options)):
+                return "stale"
+            answers = payload.get("answers") or {}
+            if str(q_idx) in answers:
+                return "dup"
+            answers[str(q_idx)] = options[opt_idx]
+            payload["answers"] = answers
+
+            message_ids = payload.get("message_ids") or []
+            if q_idx < len(message_ids):
+                try:
+                    await self._bot.edit_message_reply_markup(
+                        chat_id=user_id, message_id=message_ids[q_idx],
+                        reply_markup=None,
+                    )
+                except Exception as e:
+                    logger.debug("Form keyboard strip failed: %s", e)
+
+            if len(answers) < len(questions):
+                await db_module.set_pending_tool_call(
+                    user_id=user_id, tool_call_id=pending["tool_call_id"],
+                    tool_name="ask_user_form",
+                    options_json=json.dumps(payload, ensure_ascii=False),
+                    message_id=pending["message_id"],
+                )
+                return "recorded"
+
+            result = {q["question"]: answers[str(i)]
+                      for i, q in enumerate(questions)}
+            await db_module.delete_pending_tool_call(user_id)
+            await db_module.insert_chat_message(
+                user_id, "tool",
+                content=json.dumps({"answers": result}, ensure_ascii=False),
+                tool_call_id=pending["tool_call_id"],
+            )
+            await self._drive_turn(user_id)
+            return "done"
 
     async def _handle_confirmation(
         self, user_id: int, tool_call_id: str, name: str, args: dict,

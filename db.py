@@ -471,6 +471,19 @@ async def set_watch_autobook(watch_id: int, mode: str) -> None:
         await conn.commit()
 
 
+async def get_goal_watches(user_id: int, goal_id: str) -> list[dict]:
+    """Активные слежки пользователя, принадлежащие цели."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """SELECT * FROM watches
+               WHERE user_id = ? AND goal_id = ? AND active = 1
+               ORDER BY id""",
+            (user_id, goal_id),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
 async def stop_goal_watches(goal_id: str, except_id: int | None = None) -> list[int]:
     """Деактивирует все активные слежки цели (кроме except_id), возвращает их id."""
     async with aiosqlite.connect(DB_PATH) as conn:
