@@ -192,7 +192,8 @@ def _directions_kb(provider_keys: list[str]) -> InlineKeyboardMarkup:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     role = await get_user_role(message.from_user.id)
     await message.answer(
         "Привет! Слежу за местами в маршрутках. Просто напиши, что нужно.\n\n"
@@ -202,8 +203,9 @@ async def cmd_start(message: Message):
 
 
 @router.message(Command("reset"))
-async def cmd_reset(message: Message):
+async def cmd_reset(message: Message, state: FSMContext):
     """Очистка LLM-сессии: своей — любому, чужой (/reset <id>) — админу."""
+    await state.clear()
     parts = (message.text or "").split()
     target = message.from_user.id
     if len(parts) > 1:
@@ -511,7 +513,7 @@ def _valid_time(t: str) -> bool:
 @router.message(F.photo)
 async def on_photo(message: Message, state: FSMContext):
     if await state.get_state() is not None:
-        return
+        await state.clear()
     if _agent is None:
         return
     photo = message.photo[-1]
@@ -530,7 +532,7 @@ async def on_photo(message: Message, state: FSMContext):
 @router.message(F.voice | F.audio)
 async def on_voice_or_audio(message: Message, state: FSMContext):
     if await state.get_state() is not None:
-        return
+        await state.clear()
     if _agent is None:
         return
     if message.voice:
@@ -562,7 +564,9 @@ async def on_voice_or_audio(message: Message, state: FSMContext):
 @router.message(F.text)
 async def on_text_fallback(message: Message, state: FSMContext):
     if await state.get_state() is not None:
-        return
+        # шаг мастера /watch ждал клик по кнопке, а юзер пишет текст —
+        # мастер не держит в плену: выходим и отдаём сообщение агенту
+        await state.clear()
     if message.text and message.text.strip() == AUTH_CODE:
         # код не должен утекать в историю LLM
         await set_user_role(message.from_user.id, "admin")
