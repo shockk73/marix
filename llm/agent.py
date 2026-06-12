@@ -44,6 +44,9 @@ _TOOL_THINKING_LABELS = {
     "list_invites": "Смотрю инвайты…",
     "show_screen": "Собираю экран…",
     "generate_sessions_report": "Готовлю отчёт…",
+    "save_baranovichi_credentials": "Подключаю аккаунт…",
+    "get_credentials_status": "Смотрю статус автоброни…",
+    "delete_credentials": "Отключаю аккаунт…",
 }
 
 

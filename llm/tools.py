@@ -10,6 +10,9 @@ from aiogram.types import BufferedInputFile
 import db as db_module
 import scheduler
 from report import build_sessions_report, collect_sessions_data
+from providers.baranovichi_session import (
+    BOOKER, InvalidCredentials, normalize_phone,
+)
 from providers import PROVIDERS
 from providers.atlas_proxy import (
     get_atlas_proxy_status,
@@ -248,6 +251,44 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "list_self_callbacks",
             "description": "Показать pending self-callbacks агента для этого пользователя.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_baranovichi_credentials",
+            "description": (
+                "Подключить аккаунт tickets.baranovichi-express.by для "
+                "автобронирования: пробный логин и сохранение кредов. "
+                "Телефон в любом виде (+375291776296, 8029…), пароль как есть."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {"type": "string"},
+                    "password": {"type": "string"},
+                },
+                "required": ["phone", "password"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_credentials_status",
+            "description": (
+                "Статус аккаунта автоброни baranovichi-express: подключён ли, "
+                "телефон маской."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_credentials",
+            "description": "Отключить аккаунт автоброни (удалить сохранённые креды).",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -571,6 +612,51 @@ async def _tool_list_invites(args: dict, ctx: ToolContext) -> str:
                       ensure_ascii=False)
 
 
+def _mask_phone(phone: str) -> str:
+    if len(phone) < 6:
+        return phone
+    return f"{phone[:4]}…{phone[-2:]}"
+
+
+async def _tool_save_baranovichi_credentials(args: dict, ctx: ToolContext) -> str:
+    phone_raw = args.get("phone")
+    password = args.get("password")
+    if not isinstance(phone_raw, str) or not isinstance(password, str) or not password:
+        return _err("нужны phone и password")
+    try:
+        phone = normalize_phone(phone_raw)
+    except ValueError as e:
+        return _err(str(e))
+    try:
+        await BOOKER.verify_login(phone, password)
+    except InvalidCredentials:
+        await db_module.scrub_chat_secret(ctx.user_id, password)
+        return _err("Логин/пароль не подходят к сайту baranovichi-express")
+    except httpx.HTTPError as e:
+        await db_module.scrub_chat_secret(ctx.user_id, password)
+        return _err(f"Сайт недоступен, попробуй позже: {type(e).__name__}")
+    await db_module.save_site_credentials(ctx.user_id, phone, password)
+    await db_module.scrub_chat_secret(ctx.user_id, password)
+    return json.dumps({"connected": True, "phone": _mask_phone(phone)},
+                      ensure_ascii=False)
+
+
+async def _tool_get_credentials_status(args: dict, ctx: ToolContext) -> str:
+    creds = await db_module.get_site_credentials(ctx.user_id)
+    if creds is None:
+        return json.dumps({"connected": False}, ensure_ascii=False)
+    return json.dumps({
+        "connected": True,
+        "phone_masked": _mask_phone(creds["phone"]),
+        "verified_at": creds["verified_at"],
+    }, ensure_ascii=False)
+
+
+async def _tool_delete_credentials(args: dict, ctx: ToolContext) -> str:
+    deleted = await db_module.delete_site_credentials(ctx.user_id)
+    return json.dumps({"deleted": deleted}, ensure_ascii=False)
+
+
 async def _tool_generate_sessions_report(args: dict, ctx: ToolContext) -> str:
     if ctx.role != "admin":
         return _err("generate_sessions_report доступен только админу")
@@ -600,6 +686,9 @@ _HANDLERS = {
     "create_invite": _tool_create_invite,
     "list_invites": _tool_list_invites,
     "generate_sessions_report": _tool_generate_sessions_report,
+    "save_baranovichi_credentials": _tool_save_baranovichi_credentials,
+    "get_credentials_status": _tool_get_credentials_status,
+    "delete_credentials": _tool_delete_credentials,
 }
 
 

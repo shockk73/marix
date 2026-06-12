@@ -39,6 +39,8 @@ def test_tool_schemas_contains_all_expected_names():
         "stop_all_watches", "check_trips_now", "ask_user", "show_screen",
         "get_atlas_proxy_status", "set_atlas_proxy_target",
         "schedule_self_callback", "list_self_callbacks",
+        "save_baranovichi_credentials", "get_credentials_status",
+        "delete_credentials",
     }
 
 

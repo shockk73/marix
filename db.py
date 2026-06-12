@@ -120,6 +120,35 @@ CREATE TABLE IF NOT EXISTS invites (
 )
 """
 
+_CREATE_SITE_CREDENTIALS = """
+CREATE TABLE IF NOT EXISTS site_credentials (
+    user_id    INTEGER PRIMARY KEY,
+    site       TEXT NOT NULL DEFAULT 'baranovichi_express',
+    phone      TEXT NOT NULL,
+    password   TEXT NOT NULL,
+    verified_at TEXT,
+    created_at TEXT NOT NULL
+)
+"""
+
+_CREATE_BOOKINGS = """
+CREATE TABLE IF NOT EXISTS bookings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    site        TEXT NOT NULL DEFAULT 'baranovichi_express',
+    ticket_id   TEXT,
+    trip_id     TEXT,
+    date        TEXT NOT NULL,
+    direction   TEXT NOT NULL,
+    departure_time TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'active',
+    watch_id    INTEGER,
+    goal_id     TEXT,
+    created_at  TEXT NOT NULL,
+    canceled_at TEXT
+)
+"""
+
 MAX_AUTH_ATTEMPTS = 3
 LLM_SESSION_VERSION_KEY = "llm_session_version"
 ATLAS_PROXY_TARGET_KEY = "atlas_proxy_target"
@@ -148,8 +177,15 @@ async def init_db():
         await conn.execute(_CREATE_WATCH_STATUSES)
         await conn.execute(_CREATE_AGENT_CALLBACKS)
         await conn.execute(_CREATE_INVITES)
+        await conn.execute(_CREATE_SITE_CREDENTIALS)
+        await conn.execute(_CREATE_BOOKINGS)
         await _ensure_column(conn, "authorized_users",
                              "role TEXT NOT NULL DEFAULT 'user'")
+        await _ensure_column(conn, "watches",
+                             "autobook TEXT NOT NULL DEFAULT 'off'")
+        await _ensure_column(conn, "watches", "goal_id TEXT")
+        await _ensure_column(conn, "watches", "pref_time_from TEXT")
+        await _ensure_column(conn, "watches", "pref_time_to TEXT")
         await conn.commit()
 
 
@@ -237,6 +273,128 @@ async def get_authorized_users() -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def save_site_credentials(user_id: int, phone: str, password: str) -> None:
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO site_credentials
+               (user_id, phone, password, verified_at, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 phone       = excluded.phone,
+                 password    = excluded.password,
+                 verified_at = excluded.verified_at""",
+            (user_id, phone, password, now, now),
+        )
+        await conn.commit()
+
+
+async def get_site_credentials(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM site_credentials WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def delete_site_credentials(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "DELETE FROM site_credentials WHERE user_id = ?", (user_id,))
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+async def scrub_chat_secret(user_id: int, secret: str) -> None:
+    """Затирает секрет в истории чата (content и tool_calls) — чтобы пароль
+    не висел в контексте LLM и админ-отчёте."""
+    if not secret:
+        return
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """UPDATE chat_messages
+               SET content = REPLACE(content, ?, '***')
+               WHERE user_id = ? AND content LIKE '%' || ? || '%'""",
+            (secret, user_id, secret),
+        )
+        await conn.execute(
+            """UPDATE chat_messages
+               SET tool_calls = REPLACE(tool_calls, ?, '***')
+               WHERE user_id = ? AND tool_calls LIKE '%' || ? || '%'""",
+            (secret, user_id, secret),
+        )
+        await conn.commit()
+
+
+async def create_booking(
+    user_id: int,
+    date: str,
+    direction: str,
+    departure_time: str,
+    ticket_id: str | None = None,
+    trip_id: str | None = None,
+    watch_id: int | None = None,
+    goal_id: str | None = None,
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """INSERT INTO bookings
+               (user_id, ticket_id, trip_id, date, direction, departure_time,
+                status, watch_id, goal_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+            (user_id, ticket_id, trip_id, date, direction, departure_time,
+             watch_id, goal_id, datetime.now().isoformat()),
+        )
+        await conn.commit()
+        return cur.lastrowid
+
+
+async def get_user_bookings(user_id: int, active_only: bool = True) -> list[dict]:
+    query = "SELECT * FROM bookings WHERE user_id = ?"
+    if active_only:
+        query += " AND status = 'active'"
+    query += " ORDER BY id"
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(query, (user_id,))
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_booking(booking_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM bookings WHERE id = ?", (booking_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def get_active_goal_booking(user_id: int, goal_id: str | None) -> dict | None:
+    if not goal_id:
+        return None
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """SELECT * FROM bookings
+               WHERE user_id = ? AND goal_id = ? AND status = 'active'
+               ORDER BY id DESC LIMIT 1""",
+            (user_id, goal_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def mark_booking_canceled(booking_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """UPDATE bookings SET status = 'canceled', canceled_at = ?
+               WHERE id = ?""",
+            (datetime.now().isoformat(), booking_id),
+        )
+        await conn.commit()
+
+
 async def get_failed_attempts(user_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
@@ -275,17 +433,59 @@ async def create_watch(
     time_from: str,
     time_to: str,
     interval_sec: int,
+    autobook: str = "off",
+    goal_id: str | None = None,
+    pref_time_from: str | None = None,
+    pref_time_to: str | None = None,
 ) -> int:
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
             """INSERT INTO watches
-               (user_id, provider, direction, date, time_from, time_to, interval_sec, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, provider, direction, date, time_from, time_to, interval_sec,
+               (user_id, provider, direction, date, time_from, time_to,
+                interval_sec, autobook, goal_id, pref_time_from, pref_time_to,
+                created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, provider, direction, date, time_from, time_to,
+             interval_sec, autobook, goal_id, pref_time_from, pref_time_to,
              datetime.now().isoformat()),
         )
         await conn.commit()
         return cur.lastrowid
+
+
+async def get_watch(watch_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM watches WHERE id = ?", (watch_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def set_watch_autobook(watch_id: int, mode: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE watches SET autobook = ? WHERE id = ?",
+            (mode, watch_id),
+        )
+        await conn.commit()
+
+
+async def stop_goal_watches(goal_id: str) -> list[int]:
+    """Деактивирует все активные слежки цели, возвращает их id."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT id FROM watches WHERE goal_id = ? AND active = 1",
+            (goal_id,),
+        )
+        ids = [r[0] for r in await cur.fetchall()]
+        if ids:
+            await conn.execute(
+                "UPDATE watches SET active = 0 WHERE goal_id = ?",
+                (goal_id,),
+            )
+            await conn.commit()
+        return ids
 
 
 async def get_active_watches() -> list[dict]:
