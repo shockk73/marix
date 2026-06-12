@@ -660,11 +660,25 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
     if autobook != "off":
         if "baranovichi_express" not in providers:
             return _err("autobook доступен только для baranovichi_express")
-        if await db_module.get_site_credentials(ctx.user_id) is None:
+        creds = await db_module.get_site_credentials(ctx.user_id)
+        if creds is None:
             return _err(
                 "Для автоброни нужен аккаунт сайта: сначала вызови "
                 "save_baranovichi_credentials (попроси у пользователя "
                 "телефон и пароль от tickets.baranovichi-express.by)")
+        # живой пробный логин: автобронь с протухшими кредами бесполезна
+        try:
+            await BOOKER.verify_login(creds["phone"], creds["password"])
+        except InvalidCredentials:
+            return _err(
+                "Сохранённые креды не подходят — логин на сайте не прошёл. "
+                "Попроси пользователя переподключить аккаунт "
+                "(save_baranovichi_credentials), потом создай слежку заново")
+        except Exception as e:
+            return _err(
+                f"Не удалось проверить аккаунт — сайт недоступен "
+                f"({type(e).__name__}). Попробуй чуть позже или создай "
+                f"слежку без автоброни")
 
     pref_from = args.get("pref_time_from")
     pref_to = args.get("pref_time_to")

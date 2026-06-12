@@ -15,10 +15,10 @@ from datetime import datetime
 from config import AUTH_CODE
 from db import (
     MAX_AUTH_ATTEMPTS,
-    authorize_user, create_watch, get_active_goal_booking, get_active_watches,
-    get_user_name, get_user_role, get_user_watches, get_watch,
-    increment_failed_attempts, is_authorized, is_banned, set_user_role,
-    stop_watch as db_stop_watch, use_invite,
+    authorize_user, clear_chat_session, create_watch, get_active_goal_booking,
+    get_active_watches, get_user_name, get_user_role, get_user_watches,
+    get_watch, increment_failed_attempts, is_authorized, is_banned,
+    set_user_role, stop_watch as db_stop_watch, use_invite,
 )
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
@@ -196,9 +196,27 @@ async def cmd_start(message: Message):
     role = await get_user_role(message.from_user.id)
     await message.answer(
         "Привет! Слежу за местами в маршрутках. Просто напиши, что нужно.\n\n"
-        "Команды-фоллбек: /watch, /list, /stop <id>",
+        "Команды-фоллбек: /watch, /list, /stop <id>, /reset",
         reply_markup=main_reply_kb(role),
     )
+
+
+@router.message(Command("reset"))
+async def cmd_reset(message: Message):
+    """Очистка LLM-сессии: своей — любому, чужой (/reset <id>) — админу."""
+    parts = (message.text or "").split()
+    target = message.from_user.id
+    if len(parts) > 1:
+        if not parts[1].isdigit():
+            await message.answer("Использование: /reset [user_id]")
+            return
+        if await get_user_role(message.from_user.id) != "admin":
+            await message.answer("Чужую сессию может чистить только админ.")
+            return
+        target = int(parts[1])
+    await clear_chat_session(target)
+    suffix = f" (юзер {target})" if target != message.from_user.id else ""
+    await message.answer(f"Сессия очищена — начинаем с чистого листа.{suffix}")
 
 
 @router.message(Command("auth"))

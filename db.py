@@ -749,6 +749,16 @@ async def prune_chat_messages(user_id: int, keep: int) -> None:
         await conn.commit()
 
 
+async def clear_chat_session(user_id: int) -> None:
+    """Чистый лист для одного юзера: история LLM + висящие вопросы."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "DELETE FROM chat_messages WHERE user_id = ?", (user_id,))
+        await conn.execute(
+            "DELETE FROM pending_tool_calls WHERE user_id = ?", (user_id,))
+        await conn.commit()
+
+
 async def reset_llm_sessions() -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute("DELETE FROM chat_messages")

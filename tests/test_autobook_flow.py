@@ -46,6 +46,12 @@ class FakeBooker:
     async def get_stops(self, user_id, date, direction):
         return self.stops
 
+    async def verify_login(self, phone, password):
+        self.verify_calls = getattr(self, "verify_calls", [])
+        self.verify_calls.append(phone)
+        if getattr(self, "verify_error", None):
+            raise self.verify_error
+
 
 @pytest.fixture
 def fake_booker(monkeypatch):
@@ -262,7 +268,7 @@ async def test_booked_message_names_stops(tmp_db, fake_booker):
 
 
 @pytest.mark.asyncio
-async def test_create_watch_stores_stops_and_validates(tmp_db, fake_scheduler):
+async def test_create_watch_stores_stops_and_validates(tmp_db, fake_scheduler, fake_booker):
     await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
     ctx = ToolContext(user_id=1)
     base = {
@@ -326,6 +332,52 @@ async def test_confirm_mode_sends_booking_buttons(tmp_db, baran_provider, fake_b
     assert kb[0][0].callback_data == f"bk:b:{watch['id']}:11:00"
     assert kb[1][0].callback_data == f"bk:b:{watch['id']}:12:30"
     assert fake_booker.book_calls == []
+
+
+@pytest.mark.asyncio
+async def test_off_mode_with_creds_gets_booking_buttons(tmp_db, baran_provider, fake_booker):
+    bot = FakeBot()
+    scheduler.init_scheduler(bot)
+    await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
+    watch = await _mk_watch_row(autobook="off", goal_id="g20")
+    baran_provider.trips = [_trip("t1", "12:30")]
+    state = {"notified": set(), "consecutive_errors": 0}
+
+    await scheduler._poll_once(watch, None, state)
+
+    msg = next(m for m in bot.sent if m["reply_markup"] is not None)
+    assert "Появились места" in msg["text"]
+    kb = msg["reply_markup"].inline_keyboard
+    assert kb[0][0].callback_data == f"bk:b:{watch['id']}:12:30"
+    assert fake_booker.book_calls == []   # сам не бронировал
+
+
+@pytest.mark.asyncio
+async def test_off_mode_without_creds_plain_notification(tmp_db, baran_provider, fake_booker):
+    bot = FakeBot()
+    scheduler.init_scheduler(bot)
+    watch = await _mk_watch_row(autobook="off", goal_id="g21")
+    baran_provider.trips = [_trip("t1", "12:30")]
+    state = {"notified": set(), "consecutive_errors": 0}
+
+    await scheduler._poll_once(watch, None, state)
+
+    msg = next(m for m in bot.sent if "Появились места" in m["text"])
+    assert msg["reply_markup"] is None    # кнопки нет — аккаунта нет
+
+
+@pytest.mark.asyncio
+async def test_clear_chat_session(tmp_db):
+    await db_module.insert_chat_message(1, "user", content="привет")
+    await db_module.insert_chat_message(1, "assistant", content="привет!")
+    await db_module.set_pending_tool_call(1, "c1", "ask_user", "[]", 5)
+    await db_module.insert_chat_message(2, "user", content="чужое")
+
+    await db_module.clear_chat_session(1)
+
+    assert await db_module.get_recent_chat_messages(1, 100) == []
+    assert await db_module.get_pending_tool_call(1) is None
+    assert len(await db_module.get_recent_chat_messages(2, 100)) == 1
 
 
 @pytest.mark.asyncio
@@ -438,7 +490,7 @@ async def test_rebook_same_time_is_idempotent(tmp_db, fake_booker):
 
 
 @pytest.mark.asyncio
-async def test_create_watch_tool_autobook_validation(tmp_db, fake_scheduler):
+async def test_create_watch_tool_autobook_validation(tmp_db, fake_scheduler, fake_booker):
     ctx = ToolContext(user_id=1)
     base = {
         "providers": ["baranovichi_express"], "direction": "mnsk_baran",
@@ -449,6 +501,16 @@ async def test_create_watch_tool_autobook_validation(tmp_db, fake_scheduler):
     out = json.loads(await dispatch_tool(
         "create_watch", {**base, "autobook": "auto"}, ctx))
     assert "error" in out
+
+    # креды есть, но логин не проходит → агенту точная причина
+    await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "old-pw")
+    fake_booker.verify_error = InvalidCredentials("bad")
+    out = json.loads(await dispatch_tool(
+        "create_watch", {**base, "autobook": "auto"}, ctx))
+    assert "error" in out
+    assert "не подходят" in out["error"]
+    fake_booker.verify_error = None
+    await db_module.delete_site_credentials(1)
 
     # не-барановичи
     out = json.loads(await dispatch_tool("create_watch", {
@@ -477,7 +539,7 @@ async def test_create_watch_tool_autobook_validation(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
-async def test_create_watch_joins_existing_goal(tmp_db, fake_scheduler):
+async def test_create_watch_joins_existing_goal(tmp_db, fake_scheduler, fake_booker):
     await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
     ctx = ToolContext(user_id=1)
     base = {

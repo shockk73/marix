@@ -217,8 +217,7 @@ async def _poll_once(watch: dict, client: httpx.AsyncClient, state: dict) -> Non
 
     if newly:
         handled = False
-        if (watch["provider"] == "baranovichi_express"
-                and (watch.get("autobook") or "off") != "off"):
+        if watch["provider"] == "baranovichi_express":
             handled = await _handle_autobook(watch, newly)
         # Сначала уведомление, потом фиксация — упавшая отправка
         # повторится на следующем тике (at-least-once).
@@ -228,8 +227,10 @@ async def _poll_once(watch: dict, client: httpx.AsyncClient, state: dict) -> Non
 
 
 async def _handle_autobook(watch: dict, newly: list[Trip]) -> bool:
-    """Автобронь/предложения брони для baranovichi_express.
-    True — уведомление уже отправлено (или намеренно подавлено),
+    """Автобронь/предложения брони для baranovichi_express (любой режим).
+    auto — бронирует сам; off/confirm — уведомление с кнопками
+    «Забронировать», если у юзера подключён аккаунт (off без аккаунта —
+    обычное уведомление). True — сообщение уже отправлено/подавлено,
     False — пусть уйдёт обычное уведомление."""
     from booking_flow import execute_booking
 
@@ -295,7 +296,12 @@ async def _handle_autobook(watch: dict, newly: list[Trip]) -> bool:
             return False
         return False  # error: залогировано, уйдёт обычное уведомление
 
-    # mode == "confirm": обычное уведомление + кнопки брони
+    if mode == "off":
+        # без автоброни кнопка брони появляется только при подключённом аккаунте
+        if await db_module.get_site_credentials(user_id) is None:
+            return False
+
+    # confirm / off-с-аккаунтом: обычное уведомление + кнопки брони
     candidates = sorted(newly, key=lambda t: (not in_pref(t), t.departure_time))
     rows = [[InlineKeyboardButton(
         text=f"🎫 Забронировать {t.departure_time}",
