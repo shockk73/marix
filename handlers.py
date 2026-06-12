@@ -1,4 +1,5 @@
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from aiogram import BaseMiddleware, Router, F
 from aiogram.filters import Command
@@ -14,9 +15,9 @@ from datetime import datetime
 from config import AUTH_CODE
 from db import (
     MAX_AUTH_ATTEMPTS,
-    authorize_user, create_watch, get_user_role, get_user_watches,
-    increment_failed_attempts, is_authorized, is_banned, set_user_role,
-    stop_watch as db_stop_watch, use_invite,
+    authorize_user, create_watch, get_active_goal_booking, get_user_role,
+    get_user_watches, get_watch, increment_failed_attempts, is_authorized,
+    is_banned, set_user_role, stop_watch as db_stop_watch, use_invite,
 )
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
@@ -329,6 +330,7 @@ async def on_interval(message: Message, state: FSMContext):
         return
 
     created = []
+    goal_id = uuid4().hex[:12]
     for provider_key in selected:
         watch_id = await create_watch(
             user_id=message.from_user.id,
@@ -338,6 +340,7 @@ async def on_interval(message: Message, state: FSMContext):
             time_from=data["time_from"],
             time_to=data["time_to"],
             interval_sec=interval,
+            goal_id=goal_id,
         )
         await start_watch({
             "id": watch_id,
@@ -349,6 +352,10 @@ async def on_interval(message: Message, state: FSMContext):
             "time_from": data["time_from"],
             "time_to": data["time_to"],
             "interval_sec": interval,
+            "autobook": "off",
+            "goal_id": goal_id,
+            "pref_time_from": None,
+            "pref_time_to": None,
         })
         p = PROVIDERS[provider_key]
         created.append(f"#{watch_id} {p.display_name} (/stop {watch_id})")
@@ -502,7 +509,8 @@ async def on_ai_callback(cb: CallbackQuery):
         options = _json.loads(pending["options_json"])
     except Exception:
         options = []
-    if not (0 <= idx < len(options)):
+    if not isinstance(options, list) or not (0 <= idx < len(options)):
+        # dict в options_json — это pending-подтверждение (aic:), не наш формат
         await cb.answer()
         return
 
@@ -513,3 +521,83 @@ async def on_ai_callback(cb: CallbackQuery):
         pass
     await cb.answer()
     await _agent.continue_turn(user_id=user_id, selected_option=selected)
+
+
+@router.callback_query(F.data.startswith("aic:"))
+async def on_ai_confirm(cb: CallbackQuery):
+    """Кнопки «Да/Нет» системного подтверждения state-changing инструмента."""
+    if _agent is None:
+        await cb.answer()
+        return
+    from db import get_pending_tool_call
+    pending = await get_pending_tool_call(cb.from_user.id)
+    if pending is None:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.answer("Вопрос устарел.", show_alert=False)
+        return
+    approved = cb.data == "aic:yes"
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.answer("Выполняю…" if approved else "Отменил.")
+    await _agent.resolve_confirmation(user_id=cb.from_user.id, approved=approved)
+
+
+@router.callback_query(F.data.startswith("bk:"))
+async def on_booking_button(cb: CallbackQuery):
+    """Кнопки брони из уведомлений: bk:b — забронировать, bk:r — перебронировать."""
+    from booking_flow import execute_booking
+
+    parts = cb.data.split(":", 3)
+    if len(parts) != 4 or not parts[2].isdigit():
+        await cb.answer()
+        return
+    kind, watch_id, dep_time = parts[1], int(parts[2]), parts[3]
+    user_id = cb.from_user.id
+
+    watch = await get_watch(watch_id)
+    if watch is None or watch["user_id"] != user_id:
+        await cb.answer("Слежка не найдена.", show_alert=True)
+        return
+
+    booking = await get_active_goal_booking(user_id, watch.get("goal_id"))
+    rebook_from = None
+    if kind == "r":
+        if booking is not None and booking["departure_time"] == dep_time:
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await cb.answer("Уже забронировано ✅", show_alert=False)
+            return
+        rebook_from = booking
+    else:
+        if booking is not None:
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await cb.answer(
+                f"Уже есть бронь на {booking['departure_time']} ✅",
+                show_alert=False,
+            )
+            return
+
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.answer("Бронирую…")
+    _, text, _ = await execute_booking(
+        user_id=user_id,
+        date=watch["date"],
+        direction=watch["direction"],
+        departure_time=dep_time,
+        watch=watch,
+        rebook_from=rebook_from,
+    )
+    await cb.message.answer(text)

@@ -1,11 +1,14 @@
 import asyncio
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 from aiogram.exceptions import TelegramRetryAfter
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+import db as db_module
 from db import (
     get_active_watches,
     mark_watch_check_error,
@@ -22,6 +25,16 @@ _tasks: dict[int, asyncio.Task] = {}
 _bot: Any = None
 
 ALERT_THRESHOLD = 10
+
+_MSK = timezone(timedelta(hours=3))
+
+
+def _now() -> datetime:
+    return datetime.now(_MSK)
+
+
+class WatchStopped(Exception):
+    """Слежка остановлена изнутри итерации (истекла или цель достигнута)."""
 
 _HTTP_HEADERS = {
     "User-Agent": (
@@ -73,6 +86,14 @@ def _backoff_multiplier(consecutive_errors: int) -> int:
     if consecutive_errors == 0:
         return 1
     return min(2 ** (consecutive_errors // 5), 8)
+
+
+def watch_expired(watch: dict, now: datetime) -> bool:
+    """Окно слежки целиком в прошлом — следить больше не за чем."""
+    end = datetime.strptime(
+        f"{watch['date']} {watch['time_to']}", "%Y-%m-%d %H:%M",
+    ).replace(tzinfo=_MSK)
+    return now > end
 
 
 async def start_watch(watch: dict) -> None:
@@ -140,6 +161,8 @@ async def _poll_loop(watch: dict) -> None:
                 await _poll_once(watch, client, state)
             except asyncio.CancelledError:
                 break
+            except WatchStopped:
+                break
             except Exception as exc:
                 await _handle_poll_error(watch, state, exc)
 
@@ -156,6 +179,18 @@ async def _poll_once(watch: dict, client: httpx.AsyncClient, state: dict) -> Non
     _poll_loop через _handle_poll_error."""
     watch_id = watch["id"]
     provider = PROVIDERS[watch["provider"]]
+
+    if watch_expired(watch, _now()):
+        await db_module.stop_watch(watch_id, watch["user_id"])
+        try:
+            await send_with_retry(
+                _bot, watch["user_id"],
+                f"⏳ Слежка #{watch_id} истекла (окно {watch['date']} "
+                f"{watch['time_from']}–{watch['time_to']} прошло) — остановил.",
+            )
+        except Exception as e:
+            logger.warning("Expiry notice for watch %d failed: %s", watch_id, e)
+        raise WatchStopped()
 
     await mark_watch_check_started(watch_id)
     all_trips = await provider.get_trips(client, watch["date"], watch["direction"])
@@ -181,10 +216,90 @@ async def _poll_once(watch: dict, client: httpx.AsyncClient, state: dict) -> Non
     state["consecutive_errors"] = 0
 
     if newly:
+        handled = False
+        if (watch["provider"] == "baranovichi_express"
+                and (watch.get("autobook") or "off") != "off"):
+            handled = await _handle_autobook(watch, newly)
         # Сначала уведомление, потом фиксация — упавшая отправка
         # повторится на следующем тике (at-least-once).
-        await _send_notification(watch, newly)
+        if not handled:
+            await _send_notification(watch, newly)
         await update_notified_trips(watch_id, list(state["notified"]))
+
+
+async def _handle_autobook(watch: dict, newly: list[Trip]) -> bool:
+    """Автобронь/предложения брони для baranovichi_express.
+    True — уведомление уже отправлено (или намеренно подавлено),
+    False — пусть уйдёт обычное уведомление."""
+    from booking_flow import execute_booking
+
+    user_id = watch["user_id"]
+    goal_id = watch.get("goal_id")
+    pref_from = watch.get("pref_time_from")
+    pref_to = watch.get("pref_time_to")
+    has_pref = bool(pref_from and pref_to)
+
+    def in_pref(t: Trip) -> bool:
+        return has_pref and pref_from <= t.departure_time <= pref_to
+
+    booking = await db_module.get_active_goal_booking(user_id, goal_id)
+    if booking is not None:
+        if not has_pref or (pref_from <= booking["departure_time"] <= pref_to):
+            # цель уже достигнута — слежка осталась от гонки, гасим себя
+            await db_module.stop_watch(watch["id"], user_id)
+            raise WatchStopped()
+        candidates = sorted((t for t in newly if in_pref(t)),
+                            key=lambda t: t.departure_time)
+        if not candidates:
+            return True  # бронь уже есть, ничего лучше не появилось — молчим
+        rows = [[InlineKeyboardButton(
+            text=f"🔁 Перебронировать на {t.departure_time}",
+            callback_data=f"bk:r:{watch['id']}:{t.departure_time}",
+        )] for t in candidates[:4]]
+        await send_with_retry(
+            _bot, user_id,
+            f"🎯 Появился слот в приоритетном окне {pref_from}–{pref_to}!\n"
+            f"Сейчас забронировано {booking['departure_time']}, {watch['date']}. "
+            f"Могу перебронировать:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        return True
+
+    mode = watch.get("autobook") or "off"
+    if mode == "auto":
+        candidates = sorted(newly, key=lambda t: (not in_pref(t), t.departure_time))
+        candidate = candidates[0]
+        status, text, stopped = await execute_booking(
+            user_id=user_id, date=watch["date"], direction=watch["direction"],
+            departure_time=candidate.departure_time, watch=watch,
+            skip_cancel_watch_id=watch["id"],
+        )
+        if status == "booked":
+            await send_with_retry(_bot, user_id, text)
+            if watch["id"] in stopped:
+                raise WatchStopped()
+            return True
+        if status == "gone":
+            return True  # место уже ушло — не дёргаем юзера
+        if status == "creds":
+            try:
+                await send_with_retry(_bot, user_id, text)
+            except Exception as e:
+                logger.warning("Creds alert failed: %s", e)
+            return False  # дальше обычное уведомление
+        return False  # error: залогировано, уйдёт обычное уведомление
+
+    # mode == "confirm": обычное уведомление + кнопки брони
+    candidates = sorted(newly, key=lambda t: (not in_pref(t), t.departure_time))
+    rows = [[InlineKeyboardButton(
+        text=f"🎫 Забронировать {t.departure_time}",
+        callback_data=f"bk:b:{watch['id']}:{t.departure_time}",
+    )] for t in candidates[:4]]
+    await send_with_retry(
+        _bot, user_id, _notification_text(watch, newly),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    return True
 
 
 async def _handle_poll_error(watch: dict, state: dict, exc: Exception) -> None:
@@ -204,7 +319,7 @@ async def _handle_poll_error(watch: dict, state: dict, exc: Exception) -> None:
             logger.warning("Health alert for watch %d failed: %s", watch_id, e)
 
 
-async def _send_notification(watch: dict, trips: list[Trip]) -> None:
+def _notification_text(watch: dict, trips: list[Trip]) -> str:
     direction_label = DIRECTION_LABELS[watch["direction"]]
     provider = PROVIDERS[watch["provider"]]
     lines = [
@@ -215,4 +330,8 @@ async def _send_notification(watch: dict, trips: list[Trip]) -> None:
     for t in sorted(trips, key=lambda x: x.departure_time):
         lines.append(f"  {t.departure_time} — {t.free_seats} мест, {t.price:.0f} {t.currency}")
     lines += ["", f"Задача #{watch['id']} | /stop {watch['id']}"]
-    await send_with_retry(_bot, watch["user_id"], "\n".join(lines))
+    return "\n".join(lines)
+
+
+async def _send_notification(watch: dict, trips: list[Trip]) -> None:
+    await send_with_retry(_bot, watch["user_id"], _notification_text(watch, trips))

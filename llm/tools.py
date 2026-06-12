@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 import httpx
 from aiogram.types import BufferedInputFile
@@ -68,6 +69,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "time_to": {"type": "string", "description": "HH:MM"},
                     "interval_sec": {"type": "integer",
                                      "description": "Минимум 60"},
+                    "autobook": {
+                        "type": "string",
+                        "enum": ["off", "confirm", "auto"],
+                        "description": (
+                            "Автобронь (только для baranovichi_express, нужны "
+                            "сохранённые креды): off — только уведомлять, "
+                            "confirm — уведомление с кнопкой брони, "
+                            "auto — бронировать сразу."
+                        ),
+                    },
+                    "pref_time_from": {
+                        "type": "string",
+                        "description": (
+                            "HH:MM, начало приоритетного окна внутри основного. "
+                            "Бронь вне него считается временной: система "
+                            "предложит перебронировать, когда появится слот "
+                            "в приоритетном окне."
+                        ),
+                    },
+                    "pref_time_to": {"type": "string",
+                                     "description": "HH:MM, конец приоритетного окна"},
                 },
                 "required": ["providers", "direction", "date",
                              "time_from", "time_to", "interval_sec"],
@@ -292,6 +314,49 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_bookings",
+            "description": "Показать активные брони пользователя на baranovichi-express.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_booking",
+            "description": "Отменить активную бронь по её id (место вернётся в продажу).",
+            "parameters": {
+                "type": "object",
+                "properties": {"booking_id": {"type": "integer"}},
+                "required": ["booking_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "book_trip_now",
+            "description": (
+                "Разово забронировать место на конкретный рейс "
+                "baranovichi-express без создания слежки. Нужны сохранённые "
+                "креды. Время рейса должно быть точным (HH:MM)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "direction": {
+                        "type": "string",
+                        "enum": ["mnsk_baran", "baran_mnsk"],
+                    },
+                    "departure_time": {"type": "string", "description": "HH:MM"},
+                },
+                "required": ["date", "direction", "departure_time"],
+            },
+        },
+    },
 ]
 
 
@@ -477,20 +542,52 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
     if not isinstance(interval, int) or interval < 60:
         return _err("interval_sec must be integer >= 60")
 
+    autobook = args.get("autobook") or "off"
+    if autobook not in ("off", "confirm", "auto"):
+        return _err("autobook must be off|confirm|auto")
+    if autobook != "off":
+        if "baranovichi_express" not in providers:
+            return _err("autobook доступен только для baranovichi_express")
+        if await db_module.get_site_credentials(ctx.user_id) is None:
+            return _err(
+                "Для автоброни нужен аккаунт сайта: сначала вызови "
+                "save_baranovichi_credentials (попроси у пользователя "
+                "телефон и пароль от tickets.baranovichi-express.by)")
+
+    pref_from = args.get("pref_time_from")
+    pref_to = args.get("pref_time_to")
+    if (pref_from is None) != (pref_to is None):
+        return _err("pref_time_from и pref_time_to задаются только вместе")
+    if pref_from is not None:
+        if not _valid_time(pref_from) or not _valid_time(pref_to):
+            return _err("pref_time_from/pref_time_to must be HH:MM")
+        if not (tf <= pref_from <= pref_to <= tt):
+            return _err("приоритетное окно должно лежать внутри основного окна")
+
+    goal_id = uuid4().hex[:12]
     created_ids = []
     for p in providers:
+        watch_autobook = autobook if p == "baranovichi_express" else "off"
         wid = await db_module.create_watch(
             user_id=ctx.user_id, provider=p, direction=direction,
             date=date_s, time_from=tf, time_to=tt, interval_sec=interval,
+            autobook=watch_autobook, goal_id=goal_id,
+            pref_time_from=pref_from, pref_time_to=pref_to,
         )
         await scheduler.start_watch({
             "id": wid, "user_id": ctx.user_id, "notified_trips": "[]",
             "provider": p, "direction": direction, "date": date_s,
             "time_from": tf, "time_to": tt, "interval_sec": interval,
+            "autobook": watch_autobook, "goal_id": goal_id,
+            "pref_time_from": pref_from, "pref_time_to": pref_to,
         })
         created_ids.append(wid)
 
-    return json.dumps({"created_ids": created_ids}, ensure_ascii=False)
+    return json.dumps({
+        "created_ids": created_ids,
+        "goal_id": goal_id,
+        "autobook": autobook,
+    }, ensure_ascii=False)
 
 
 async def _tool_stop_watch(args: dict, ctx: ToolContext) -> str:
@@ -657,6 +754,60 @@ async def _tool_delete_credentials(args: dict, ctx: ToolContext) -> str:
     return json.dumps({"deleted": deleted}, ensure_ascii=False)
 
 
+async def _tool_list_bookings(args: dict, ctx: ToolContext) -> str:
+    bookings = await db_module.get_user_bookings(ctx.user_id)
+    return json.dumps({"bookings": [{
+        "id": b["id"],
+        "date": b["date"],
+        "departure_time": b["departure_time"],
+        "direction": b["direction"],
+        "direction_label": DIRECTION_LABELS.get(b["direction"], b["direction"]),
+        "created_at": b["created_at"],
+    } for b in bookings]}, ensure_ascii=False)
+
+
+async def _tool_cancel_booking(args: dict, ctx: ToolContext) -> str:
+    booking_id = args.get("booking_id")
+    if not isinstance(booking_id, int):
+        return _err("booking_id must be integer")
+    booking = await db_module.get_booking(booking_id)
+    if booking is None or booking["user_id"] != ctx.user_id:
+        return _err(f"бронь #{booking_id} не найдена")
+    if booking["status"] != "active":
+        return _err(f"бронь #{booking_id} уже отменена")
+    try:
+        ok = await BOOKER.cancel(ctx.user_id, booking["ticket_id"],
+                                 booking["trip_id"])
+    except InvalidCredentials:
+        return _err("креды сайта не работают — переподключи аккаунт")
+    except Exception as e:
+        return _err(f"отмена не удалась: {type(e).__name__}")
+    if not ok:
+        return _err("сайт не подтвердил отмену — проверь брони на сайте")
+    await db_module.mark_booking_canceled(booking_id)
+    return json.dumps({"canceled": True, "booking_id": booking_id},
+                      ensure_ascii=False)
+
+
+async def _tool_book_trip_now(args: dict, ctx: ToolContext) -> str:
+    from booking_flow import execute_booking
+
+    date_s = args.get("date", "")
+    if not _valid_date(date_s):
+        return _err("date must be YYYY-MM-DD")
+    direction = args.get("direction")
+    if direction not in ("mnsk_baran", "baran_mnsk"):
+        return _err("direction must be mnsk_baran|baran_mnsk")
+    dep = args.get("departure_time", "")
+    if not _valid_time(dep):
+        return _err("departure_time must be HH:MM")
+    status, text, _ = await execute_booking(
+        user_id=ctx.user_id, date=date_s, direction=direction,
+        departure_time=dep, watch=None,
+    )
+    return json.dumps({"status": status, "message": text}, ensure_ascii=False)
+
+
 async def _tool_generate_sessions_report(args: dict, ctx: ToolContext) -> str:
     if ctx.role != "admin":
         return _err("generate_sessions_report доступен только админу")
@@ -689,6 +840,9 @@ _HANDLERS = {
     "save_baranovichi_credentials": _tool_save_baranovichi_credentials,
     "get_credentials_status": _tool_get_credentials_status,
     "delete_credentials": _tool_delete_credentials,
+    "list_bookings": _tool_list_bookings,
+    "cancel_booking": _tool_cancel_booking,
+    "book_trip_now": _tool_book_trip_now,
 }
 
 

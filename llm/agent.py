@@ -47,7 +47,31 @@ _TOOL_THINKING_LABELS = {
     "save_baranovichi_credentials": "Подключаю аккаунт…",
     "get_credentials_status": "Смотрю статус автоброни…",
     "delete_credentials": "Отключаю аккаунт…",
+    "list_bookings": "Смотрю брони…",
+    "cancel_booking": "Отменяю бронь…",
+    "book_trip_now": "Бронирую…",
 }
+
+# State-changing инструменты: выполняются только после явного «Да» юзера.
+CONFIRM_REQUIRED = {
+    "stop_watch", "stop_all_watches", "cancel_booking",
+    "book_trip_now", "delete_credentials",
+}
+
+
+def _confirm_summary(name: str, args: dict) -> str:
+    if name == "stop_watch":
+        return f"Остановить слежку #{args.get('watch_id')}?"
+    if name == "stop_all_watches":
+        return "Остановить ВСЕ слежки?"
+    if name == "cancel_booking":
+        return f"Отменить бронь #{args.get('booking_id')}?"
+    if name == "book_trip_now":
+        return (f"Забронировать рейс {args.get('departure_time')} "
+                f"({args.get('direction')}) на {args.get('date')}?")
+    if name == "delete_credentials":
+        return "Отключить аккаунт автоброни (удалить сохранённые креды)?"
+    return f"Выполнить действие {name}?"
 
 
 class LLMAgent:
@@ -304,6 +328,9 @@ class LLMAgent:
         watches = await db_module.get_user_watches(user_id)
         statuses = await db_module.get_watch_statuses([w["id"] for w in watches])
         callbacks = await db_module.get_user_agent_callbacks(user_id)
+        creds = await db_module.get_site_credentials(user_id)
+        bookings = await db_module.get_user_bookings(user_id)
+        phone = creds["phone"] if creds else ""
         return {
             "role": role,
             "watches": [{
@@ -311,6 +338,9 @@ class LLMAgent:
                 "direction": w["direction"], "date": w["date"],
                 "time_from": w["time_from"], "time_to": w["time_to"],
                 "interval_sec": w["interval_sec"],
+                "autobook": w.get("autobook") or "off",
+                "pref_time_from": w.get("pref_time_from"),
+                "pref_time_to": w.get("pref_time_to"),
                 "execution": statuses.get(w["id"]) or {},
             } for w in watches],
             "callbacks": [{
@@ -318,6 +348,16 @@ class LLMAgent:
                 "run_at_iso": datetime.fromtimestamp(
                     cb["run_at"], tz=_MSK).isoformat(),
             } for cb in callbacks],
+            "credentials": {
+                "connected": creds is not None,
+                "phone_masked": (f"{phone[:4]}…{phone[-2:]}"
+                                 if len(phone) >= 6 else phone) or None,
+            },
+            "bookings": [{
+                "id": b["id"], "date": b["date"],
+                "departure_time": b["departure_time"],
+                "direction": b["direction"],
+            } for b in bookings],
         }
 
     async def _send_markdown_message(
@@ -438,6 +478,10 @@ class LLMAgent:
                     if await self._handle_screen(user_id, tc_id, args):
                         ask_user_pending = True
                         break
+                elif name in CONFIRM_REQUIRED:
+                    await self._handle_confirmation(user_id, tc_id, name, args)
+                    ask_user_pending = True
+                    break
                 else:
                     try:
                         result = await dispatch_tool(name, args, ctx)
@@ -482,6 +526,69 @@ class LLMAgent:
             options_json=json.dumps(options, ensure_ascii=False),
             message_id=sent.message_id,
         )
+
+    async def _handle_confirmation(
+        self, user_id: int, tool_call_id: str, name: str, args: dict,
+    ) -> None:
+        """Системное подтверждение state-changing инструмента: кнопки Да/Нет,
+        сам вызов откладывается до resolve_confirmation."""
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да", callback_data="aic:yes"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="aic:no"),
+        ]])
+        sent = await self._send_markdown_message(
+            user_id, _confirm_summary(name, args), reply_markup=kb)
+        await db_module.set_pending_tool_call(
+            user_id=user_id, tool_call_id=tool_call_id,
+            tool_name=name,
+            options_json=json.dumps(
+                {"kind": "confirm", "name": name, "args": args},
+                ensure_ascii=False),
+            message_id=sent.message_id,
+        )
+
+    async def resolve_confirmation(self, user_id: int, approved: bool) -> None:
+        """Обработка клика Да/Нет: выполняет (или отклоняет) отложенный
+        инструмент и продолжает turn."""
+        async with self._lock_for(user_id):
+            pending = await db_module.get_pending_tool_call(user_id)
+            if pending is None:
+                return
+            try:
+                payload = json.loads(pending["options_json"])
+            except json.JSONDecodeError:
+                payload = None
+            if not isinstance(payload, dict) or payload.get("kind") != "confirm":
+                return
+            await db_module.delete_pending_tool_call(user_id)
+
+            if approved:
+                role = await db_module.get_user_role(user_id) or "user"
+                ctx = ToolContext(
+                    user_id=user_id,
+                    schedule_self_callback=self.schedule_self_callback,
+                    role=role,
+                    bot_username=self._bot_username,
+                    bot=self._bot,
+                )
+                try:
+                    result = await dispatch_tool(
+                        payload["name"], payload.get("args") or {}, ctx)
+                except Exception as e:
+                    logger.exception("Confirmed tool %s crashed: %s",
+                                     payload["name"], e)
+                    result = json.dumps(
+                        {"error": f"Tool crashed: {type(e).__name__}: {e}"},
+                        ensure_ascii=False)
+            else:
+                result = json.dumps(
+                    {"canceled": True, "reason": "user declined"},
+                    ensure_ascii=False)
+            await db_module.insert_chat_message(
+                user_id, "tool", content=result,
+                tool_call_id=pending["tool_call_id"],
+            )
+            await self._drive_turn(user_id)
 
     async def _handle_screen(self, user_id: int, tool_call_id: str, args: dict) -> bool:
         """Рендерит экран show_screen. False — аргументы невалидны, в историю

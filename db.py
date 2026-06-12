@@ -471,18 +471,19 @@ async def set_watch_autobook(watch_id: int, mode: str) -> None:
         await conn.commit()
 
 
-async def stop_goal_watches(goal_id: str) -> list[int]:
-    """Деактивирует все активные слежки цели, возвращает их id."""
+async def stop_goal_watches(goal_id: str, except_id: int | None = None) -> list[int]:
+    """Деактивирует все активные слежки цели (кроме except_id), возвращает их id."""
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
             "SELECT id FROM watches WHERE goal_id = ? AND active = 1",
             (goal_id,),
         )
-        ids = [r[0] for r in await cur.fetchall()]
+        ids = [r[0] for r in await cur.fetchall() if r[0] != except_id]
         if ids:
+            placeholders = ",".join("?" for _ in ids)
             await conn.execute(
-                "UPDATE watches SET active = 0 WHERE goal_id = ?",
-                (goal_id,),
+                f"UPDATE watches SET active = 0 WHERE id IN ({placeholders})",
+                ids,
             )
             await conn.commit()
         return ids

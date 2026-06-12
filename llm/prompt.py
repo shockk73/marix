@@ -3,7 +3,7 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-12-llm-first-ux-v1"
+LLM_SESSION_VERSION = "2026-06-12-autobook-v1"
 
 
 def build_system_prompt(
@@ -41,10 +41,16 @@ def build_system_prompt(
                          f"{(status.get('last_error') or '')[:120]}")
                 else:
                     s = status.get("status") or "not_started"
+                extra = ""
+                if (w.get("autobook") or "off") != "off":
+                    extra = f"; автобронь: {w['autobook']}"
+                    if w.get("pref_time_from"):
+                        extra += (f", приоритет "
+                                  f"{w['pref_time_from']}–{w['pref_time_to']}")
                 parts.append(
                     f"  - #{w['id']} {w['provider']} {w['direction']} {w['date']} "
                     f"{w['time_from']}–{w['time_to']} каждые {w['interval_sec']}с; "
-                    f"статус: {s}"
+                    f"статус: {s}{extra}"
                 )
         else:
             parts.append("Активных слежек у пользователя нет.")
@@ -54,6 +60,19 @@ def build_system_prompt(
                 f"Отложенных self-callback-ов: {len(callbacks)}, "
                 f"ближайший: {callbacks[0]['run_at_iso']}."
             )
+        creds = user_state.get("credentials") or {}
+        if creds.get("connected"):
+            parts.append(f"Автобронь: аккаунт подключён ({creds.get('phone_masked')}).")
+        else:
+            parts.append("Автобронь: аккаунт сайта НЕ подключён.")
+        bookings = user_state.get("bookings") or []
+        if bookings:
+            parts.append("Активные брони пользователя:")
+            for b in bookings:
+                parts.append(
+                    f"  - #{b['id']} {b['date']} {b['departure_time']} "
+                    f"{b['direction']}"
+                )
     parts += [
         "",
         "Доступные провайдеры (используй ключи в tool calls):",
@@ -107,5 +126,22 @@ def build_system_prompt(
         "возможностей + стартовый экран; «🛠 Админка» (только админ) — инвайты, отчёты. "
         "Сообщение «[новый пользователь вошёл по инвайту…]» — онбординг: поздоровайся, "
         "двумя фразами объясни, что умеешь, покажи стартовый экран show_screen.",
+        "15. Автобронь работает только на `baranovichi_express` и требует подключённого "
+        "аккаунта сайта (см. срез состояния). create_watch принимает autobook: `off` "
+        "(только уведомления), `confirm` (уведомление с кнопкой брони), `auto` (бронирует "
+        "сам и останавливает связанные слежки). Если пользователь просит автобронь без "
+        "подключённого аккаунта — попроси телефон и пароль от tickets.baranovichi-express.by "
+        "и вызови save_baranovichi_credentials. Если пользователь создал слежку на "
+        "baranovichi_express без автоброни и аккаунт не подключён — один раз предложи.",
+        "16. Приоритетное окно: если пользователь называет и широкий диапазон, и "
+        "предпочтительный («с 12 до 16, лучше 14–15») — передай pref_time_from/pref_time_to "
+        "в create_watch. Система забронирует любой слот в широком окне, а при появлении "
+        "слота в приоритетном сама предложит перебронировать.",
+        "17. Брони: list_bookings — активные брони, cancel_booking — отмена, "
+        "book_trip_now — разовая бронь точного рейса без слежки.",
+        "18. Инструменты stop_watch, stop_all_watches, cancel_booking, book_trip_now, "
+        "delete_credentials система сама подтверждает у пользователя кнопками «Да/Нет» — "
+        "вызывай их сразу, БЕЗ дополнительного вопроса с твоей стороны. Не переспрашивай "
+        "«точно?» текстом и не дублируй подтверждение через ask_user/show_screen.",
     ]
     return "\n".join(parts)

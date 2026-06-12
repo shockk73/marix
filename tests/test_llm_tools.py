@@ -40,7 +40,8 @@ def test_tool_schemas_contains_all_expected_names():
         "get_atlas_proxy_status", "set_atlas_proxy_target",
         "schedule_self_callback", "list_self_callbacks",
         "save_baranovichi_credentials", "get_credentials_status",
-        "delete_credentials",
+        "delete_credentials", "list_bookings", "cancel_booking",
+        "book_trip_now",
     }
 
 
