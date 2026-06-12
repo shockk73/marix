@@ -43,6 +43,7 @@ _TOOL_THINKING_LABELS = {
     "create_invite": "Создаю инвайт…",
     "list_invites": "Смотрю инвайты…",
     "show_screen": "Собираю экран…",
+    "generate_sessions_report": "Готовлю отчёт…",
 }
 
 
@@ -409,6 +410,7 @@ class LLMAgent:
                 schedule_self_callback=self.schedule_self_callback,
                 role=role,
                 bot_username=self._bot_username,
+                bot=self._bot,
             )
             ask_user_pending = False
             for tc in tool_calls:

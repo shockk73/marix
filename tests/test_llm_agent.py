@@ -21,12 +21,14 @@ FIXED_NOW = datetime(2026, 5, 21, 14, 30, tzinfo=MSK)
 class FakeBot:
     sent: list = None
     edited: list = None
+    documents: list = None
     _next_msg_id: int = 1000
     fail_next_markdown: bool = False
 
     def __post_init__(self):
         self.sent = []
         self.edited = []
+        self.documents = []
 
     async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
         if self.fail_next_markdown and parse_mode == "Markdown":
@@ -43,6 +45,9 @@ class FakeBot:
 
     async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None):
         self.edited.append({"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup})
+
+    async def send_document(self, chat_id, document):
+        self.documents.append({"chat_id": chat_id, "document": document})
 
 
 @pytest.fixture

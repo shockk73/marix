@@ -137,4 +137,6 @@ def test_build_tools_for_role():
     assert {"create_invite", "list_invites"} <= admin_names
     assert {"create_invite", "list_invites"}.isdisjoint(user_names)
     assert "create_watch" in user_names
-    assert len(ADMIN_TOOL_SCHEMAS) == 2
+    assert {t["function"]["name"] for t in ADMIN_TOOL_SCHEMAS} >= {
+        "create_invite", "list_invites",
+    }

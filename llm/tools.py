@@ -5,9 +5,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 import httpx
+from aiogram.types import BufferedInputFile
 
 import db as db_module
 import scheduler
+from report import build_sessions_report, collect_sessions_data
 from providers import PROVIDERS
 from providers.atlas_proxy import (
     get_atlas_proxy_status,
@@ -22,6 +24,7 @@ class ToolContext:
     schedule_self_callback: Callable[[int, float, str], Awaitable[int]] | None = None
     role: str = "user"
     bot_username: str | None = None
+    bot: Any | None = None
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -269,6 +272,18 @@ ADMIN_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "list_invites",
             "description": (
                 "Показать все инвайты и их статус (ожидает / кем использован). "
+                "Только для админа."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_sessions_report",
+            "description": (
+                "Сгенерировать HTML-отчёт по всем пользователям (последние "
+                "сообщения с LLM, слежки) и прислать файлом в чат. "
                 "Только для админа."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
@@ -556,6 +571,22 @@ async def _tool_list_invites(args: dict, ctx: ToolContext) -> str:
                       ensure_ascii=False)
 
 
+async def _tool_generate_sessions_report(args: dict, ctx: ToolContext) -> str:
+    if ctx.role != "admin":
+        return _err("generate_sessions_report доступен только админу")
+    if ctx.bot is None:
+        return _err("bot недоступен в этом контексте")
+    users = await collect_sessions_data()
+    now = datetime.now(timezone(timedelta(hours=3)))
+    html_str = build_sessions_report(users, now=now)
+    doc = BufferedInputFile(
+        html_str.encode("utf-8"),
+        filename=f"sessions-{now.date().isoformat()}.html",
+    )
+    await ctx.bot.send_document(ctx.user_id, doc)
+    return json.dumps({"sent": True, "users": len(users)}, ensure_ascii=False)
+
+
 _HANDLERS = {
     "list_watches": _tool_list_watches,
     "create_watch": _tool_create_watch,
@@ -568,6 +599,7 @@ _HANDLERS = {
     "list_self_callbacks": _tool_list_self_callbacks,
     "create_invite": _tool_create_invite,
     "list_invites": _tool_list_invites,
+    "generate_sessions_report": _tool_generate_sessions_report,
 }
 
 

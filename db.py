@@ -227,6 +227,14 @@ async def list_invites() -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_authorized_users() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT user_id, role, authorized_at FROM authorized_users")
+        return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_failed_attempts(user_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
