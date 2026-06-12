@@ -70,7 +70,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "interval_sec": {
                         "type": "integer",
                         "description": ("Интервал проверки, секунд. По умолчанию "
-                                        "120 — пользователя об этом НЕ спрашивай. "
+                                        "60 — пользователя об этом НЕ спрашивай. "
                                         "Минимум 60."),
                     },
                     "autobook": {
@@ -639,7 +639,7 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
 
     interval = args.get("interval_sec")
     if interval is None:
-        interval = 120
+        interval = 60
     if not isinstance(interval, int) or interval < 60:
         return _err("interval_sec must be integer >= 60")
 

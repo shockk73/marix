@@ -508,14 +508,14 @@ async def test_create_watch_joins_existing_goal(tmp_db, fake_scheduler):
 
 
 @pytest.mark.asyncio
-async def test_create_watch_default_interval_120(tmp_db, fake_scheduler):
+async def test_create_watch_default_interval_60(tmp_db, fake_scheduler):
     ctx = ToolContext(user_id=1)
     out = json.loads(await dispatch_tool("create_watch", {
         "providers": ["atlasbus"], "direction": "mnsk_baran",
         "date": "2099-06-14", "time_from": "00:00", "time_to": "23:59",
     }, ctx))
     w = await db_module.get_watch(out["created_ids"][0])
-    assert w["interval_sec"] == 120
+    assert w["interval_sec"] == 60
 
 
 @pytest.mark.asyncio
