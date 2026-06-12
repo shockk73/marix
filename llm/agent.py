@@ -180,10 +180,18 @@ class LLMAgent:
             caption_text = caption or ""
             placeholder = f"[photo] {caption_text}".strip()
             await db_module.insert_chat_message(user_id, "user", content=placeholder)
-            await self._drive_turn(
-                user_id,
-                _override_last_user=self._build_multimodal_user(image_bytes, mime, caption_text),
-            )
+            try:
+                await self._drive_turn(
+                    user_id,
+                    _override_last_user=self._build_multimodal_user(image_bytes, mime, caption_text),
+                    _raise_client_errors=True,
+                )
+            except httpx.HTTPStatusError as e:
+                logger.warning("Photo request rejected %s: %s",
+                               e.response.status_code, e)
+                msg = "Не получилось разобрать фото. Напиши текстом, пожалуйста."
+                await db_module.insert_chat_message(user_id, "assistant", content=msg)
+                await self._bot.send_message(user_id, msg)
 
     def _build_multimodal_user(
         self,
@@ -216,12 +224,20 @@ class LLMAgent:
                 caption_text = caption or ""
                 placeholder = f"[audio] {caption_text}".strip()
                 await db_module.insert_chat_message(user_id, "user", content=placeholder)
-                await self._drive_turn(
-                    user_id,
-                    _override_last_user=self._build_audio_user(
-                        audio_bytes, audio_format, caption_text,
-                    ),
-                )
+                try:
+                    await self._drive_turn(
+                        user_id,
+                        _override_last_user=self._build_audio_user(
+                            audio_bytes, audio_format, caption_text,
+                        ),
+                        _raise_client_errors=True,
+                    )
+                except httpx.HTTPStatusError as e:
+                    logger.warning("Audio request rejected %s: %s",
+                                   e.response.status_code, e)
+                    msg = "Не получилось разобрать голосовое. Напиши текстом, пожалуйста."
+                    await db_module.insert_chat_message(user_id, "assistant", content=msg)
+                    await self._bot.send_message(user_id, msg)
             return
 
         if LLM_STT_MODEL:
@@ -299,6 +315,7 @@ class LLMAgent:
         self,
         user_id: int,
         _override_last_user: dict[str, Any] | None = None,
+        _raise_client_errors: bool = False,
     ) -> None:
         for _turn in range(OPENROUTER_MAX_TURNS):
             try:
@@ -319,6 +336,12 @@ class LLMAgent:
                     messages=messages, tools=TOOL_SCHEMAS,
                 )
             except httpx.HTTPError as e:
+                if (
+                    _raise_client_errors
+                    and isinstance(e, httpx.HTTPStatusError)
+                    and 400 <= e.response.status_code < 500
+                ):
+                    raise
                 logger.warning("LLM HTTP error: %s", e)
                 err = "Не получилось связаться с AI, попробуй ещё раз позже."
                 await db_module.insert_chat_message(user_id, "assistant", content=err)

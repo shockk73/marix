@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 
@@ -170,7 +171,6 @@ async def test_run_turn_max_turns_safeguard(tmp_db, fake_bot, fake_scheduler, mo
 
 @pytest.mark.asyncio
 async def test_run_turn_http_error_yields_friendly_message(tmp_db, fake_bot, fake_scheduler):
-    import httpx
     client = AsyncMock()
     client.chat_completion = AsyncMock(
         side_effect=httpx.RequestError("connection refused"),
@@ -445,7 +445,6 @@ async def test_handle_audio_native_multimodal(tmp_db, fake_bot, fake_scheduler, 
 
 @pytest.mark.asyncio
 async def test_handle_audio_stt_failure(tmp_db, fake_bot, fake_scheduler, monkeypatch):
-    import httpx
     monkeypatch.setattr("llm.agent.LLM_AUDIO", False)
     monkeypatch.setattr("llm.agent.LLM_STT_MODEL", "stt/model")
     client = AsyncMock()
@@ -462,3 +461,53 @@ async def test_handle_audio_stt_failure(tmp_db, fake_bot, fake_scheduler, monkey
     assert "не удалось" in fake_bot.sent[-1]["text"].lower() or "ошибк" in fake_bot.sent[-1]["text"].lower()
     msgs = await db_module.get_recent_chat_messages(1, 100)
     assert len(msgs) == 0
+
+
+def _http_400() -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://openrouter.test/chat/completions")
+    response = httpx.Response(400, request=request, text="no multimodal")
+    return httpx.HTTPStatusError("400", request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_400_friendly_fallback(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    monkeypatch.setattr("llm.agent.LLM_VISION", True)
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=_http_400())
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_photo(user_id=1, image_bytes=b"\xff", mime="image/jpeg",
+                             caption=None, user_name=None)
+
+    assert "фото" in fake_bot.sent[-1]["text"].lower()
+    assert "текст" in fake_bot.sent[-1]["text"].lower()
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assert msgs[-1]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_handle_audio_400_friendly_fallback(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    monkeypatch.setattr("llm.agent.LLM_AUDIO", True)
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=_http_400())
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_audio(user_id=1, audio_bytes=b"\x00", audio_format="ogg",
+                             caption=None, user_name=None)
+
+    assert "голосовое" in fake_bot.sent[-1]["text"].lower()
+    msgs = await db_module.get_recent_chat_messages(1, 100)
+    assert msgs[-1]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_network_error_generic_message(tmp_db, fake_bot, fake_scheduler, monkeypatch):
+    monkeypatch.setattr("llm.agent.LLM_VISION", True)
+    client = AsyncMock()
+    client.chat_completion = AsyncMock(side_effect=httpx.RequestError("conn refused"))
+    agent = _mk_agent(fake_bot, client)
+
+    await agent.handle_photo(user_id=1, image_bytes=b"\xff", mime="image/jpeg",
+                             caption=None, user_name=None)
+
+    assert "AI" in fake_bot.sent[-1]["text"]
