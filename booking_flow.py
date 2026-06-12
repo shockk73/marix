@@ -42,11 +42,16 @@ async def execute_booking(
     watch: dict | None = None,
     rebook_from: dict | None = None,
     skip_cancel_watch_id: int | None = None,
+    pickup_stop: str | None = None,
+    dropoff_stop: str | None = None,
 ) -> tuple[str, str, list[int]]:
     """Бронирует место и ведёт сопутствующее состояние (bookings, слежки).
 
     Возвращает (status, текст_для_юзера, остановленные_watch_id).
-    status: booked | already_booked | gone | creds | error.
+    status: booked | already_booked | gone | stop_not_found | creds | error.
+    Остановки посадки/высадки берутся из аргументов или из watch; без
+    предпочтений сайт подставит первую (главную) остановку, и она будет
+    названа в подтверждении.
 
     Бронь по одной цели НЕ конкурентна: per-goal asyncio.Lock плюс повторная
     проверка активной брони внутри лока — тик шедулера, клик по кнопке,
@@ -55,6 +60,9 @@ async def execute_booking(
     переданный rebook_from мог устареть в гонке.
     """
     goal_id = watch.get("goal_id") if watch else None
+    if watch is not None:
+        pickup_stop = pickup_stop or watch.get("pickup_stop")
+        dropoff_stop = dropoff_stop or watch.get("dropoff_stop")
     async with _booking_lock(user_id, goal_id):
         if goal_id:
             current = await db_module.get_active_goal_booking(user_id, goal_id)
@@ -74,6 +82,7 @@ async def execute_booking(
             departure_time=departure_time, watch=watch, goal_id=goal_id,
             rebook_from=rebook_from,
             skip_cancel_watch_id=skip_cancel_watch_id,
+            pickup_stop=pickup_stop, dropoff_stop=dropoff_stop,
         )
 
 
@@ -86,12 +95,16 @@ async def _execute_booking_locked(
     goal_id: str | None,
     rebook_from: dict | None,
     skip_cancel_watch_id: int | None,
+    pickup_stop: str | None,
+    dropoff_stop: str | None,
 ) -> tuple[str, str, list[int]]:
     """Тело брони. Слежки цели останавливаются в БД ДО отправки текста
     (защита от двойной брони при рестарте); таска skip_cancel_watch_id не
     отменяется — вызывающий poll-цикл завершает себя сам."""
     try:
-        result = await BOOKER.book(user_id, date, direction, departure_time)
+        result = await BOOKER.book(user_id, date, direction, departure_time,
+                                   pickup_stop=pickup_stop,
+                                   dropoff_stop=dropoff_stop)
     except InvalidCredentials:
         if watch and (watch.get("autobook") or "off") != "off":
             await db_module.set_watch_autobook(watch["id"], "off")
@@ -111,6 +124,21 @@ async def _execute_booking_locked(
                 f"уведомления, бронь можно повторить вручную.",
                 [])
 
+    if result.status == "stop_not_found":
+        wanted = []
+        if pickup_stop:
+            wanted.append(f"посадка «{pickup_stop}»")
+        if dropoff_stop:
+            wanted.append(f"высадка «{dropoff_stop}»")
+        text = (f"🚫 Не нашёл остановку ({', '.join(wanted)}) у рейса "
+                f"{departure_time} — бронировать вслепую не стал.\n"
+                f"Посадка: {', '.join(result.available_pickups or []) or '—'}\n"
+                f"Высадка: {', '.join(result.available_dropoffs or []) or '—'}")
+        if watch and (watch.get("autobook") or "off") != "off":
+            await db_module.set_watch_autobook(watch["id"], "off")
+            text += "\nАвтобронь выключена — поправь остановку и включи снова."
+        return ("stop_not_found", text, [])
+
     if result.status != "booked":
         return ("gone", "😔 Не успели — место уже заняли."
                 + (" Продолжаю следить." if watch else ""), [])
@@ -121,13 +149,18 @@ async def _execute_booking_locked(
         ticket_id=result.ticket_id, trip_id=result.trip_id,
         watch_id=watch["id"] if watch else None,
         goal_id=goal_id,
+        pickup_stop=result.pickup_label,
+        dropoff_stop=result.dropoff_label,
     )
 
     lines = [
         f"✅ Забронировал рейс {departure_time}, "
         f"{DIRECTION_LABELS[direction]}, {date} (бронь #{booking_id}).",
-        "Оплата водителю при посадке; он сверит твой номер телефона.",
     ]
+    if result.pickup_label or result.dropoff_label:
+        lines.append(f"🚏 Посадка: {result.pickup_label or '—'} → "
+                     f"высадка: {result.dropoff_label or '—'}.")
+    lines.append("Оплата водителю при посадке; он сверит твой номер телефона.")
 
     if rebook_from:
         canceled_old = False

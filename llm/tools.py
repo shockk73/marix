@@ -99,6 +99,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "новой поездки: цель создастся сама."
                         ),
                     },
+                    "pickup_stop": {
+                        "type": "string",
+                        "description": (
+                            "Остановка ПОСАДКИ для автоброни (название или его "
+                            "часть, как на сайте; список — get_baranovichi_stops). "
+                            "Не указана — сайт подставит главную остановку."
+                        ),
+                    },
+                    "dropoff_stop": {
+                        "type": "string",
+                        "description": "Остановка ВЫСАДКИ для автоброни (аналогично).",
+                    },
                 },
                 "required": ["providers", "direction", "date",
                              "time_from", "time_to", "interval_sec"],
@@ -399,8 +411,38 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "enum": ["mnsk_baran", "baran_mnsk"],
                     },
                     "departure_time": {"type": "string", "description": "HH:MM"},
+                    "pickup_stop": {
+                        "type": "string",
+                        "description": ("Остановка посадки (название/часть). "
+                                        "Не указана — главная остановка."),
+                    },
+                    "dropoff_stop": {"type": "string",
+                                     "description": "Остановка высадки."},
                 },
                 "required": ["date", "direction", "departure_time"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_baranovichi_stops",
+            "description": (
+                "Списки остановок посадки и высадки baranovichi-express на "
+                "дату/направление (с живой страницы брони). Используй, чтобы "
+                "показать пользователю выбор остановок перед автобронью. "
+                "Нужны сохранённые креды."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "direction": {
+                        "type": "string",
+                        "enum": ["mnsk_baran", "baran_mnsk"],
+                    },
+                },
+                "required": ["date", "direction"],
             },
         },
     },
@@ -554,6 +596,8 @@ async def _tool_list_watches(args: dict, ctx: ToolContext) -> str:
         "goal_id": w.get("goal_id"),
         "pref_time_from": w.get("pref_time_from"),
         "pref_time_to": w.get("pref_time_to"),
+        "pickup_stop": w.get("pickup_stop"),
+        "dropoff_stop": w.get("dropoff_stop"),
         "execution": _watch_execution_payload(statuses.get(w["id"])),
     } for w in watches]
     return json.dumps({"watches": out}, ensure_ascii=False)
@@ -615,6 +659,12 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
         if not (tf <= pref_from <= pref_to <= tt):
             return _err("приоритетное окно должно лежать внутри основного окна")
 
+    pickup_stop = args.get("pickup_stop")
+    dropoff_stop = args.get("dropoff_stop")
+    if (pickup_stop or dropoff_stop) and "baranovichi_express" not in providers:
+        return _err("остановки посадки/высадки имеют смысл только для "
+                    "baranovichi_express (автобронь)")
+
     goal_id = args.get("goal_id")
     if goal_id is not None:
         if not isinstance(goal_id, str) or not goal_id:
@@ -632,12 +682,15 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
         goal_id = uuid4().hex[:12]
     created_ids = []
     for p in providers:
-        watch_autobook = autobook if p == "baranovichi_express" else "off"
+        is_baran = p == "baranovichi_express"
+        watch_autobook = autobook if is_baran else "off"
         wid = await db_module.create_watch(
             user_id=ctx.user_id, provider=p, direction=direction,
             date=date_s, time_from=tf, time_to=tt, interval_sec=interval,
             autobook=watch_autobook, goal_id=goal_id,
             pref_time_from=pref_from, pref_time_to=pref_to,
+            pickup_stop=pickup_stop if is_baran else None,
+            dropoff_stop=dropoff_stop if is_baran else None,
         )
         await scheduler.start_watch({
             "id": wid, "user_id": ctx.user_id, "notified_trips": "[]",
@@ -645,6 +698,8 @@ async def _tool_create_watch(args: dict, ctx: ToolContext) -> str:
             "time_from": tf, "time_to": tt, "interval_sec": interval,
             "autobook": watch_autobook, "goal_id": goal_id,
             "pref_time_from": pref_from, "pref_time_to": pref_to,
+            "pickup_stop": pickup_stop if is_baran else None,
+            "dropoff_stop": dropoff_stop if is_baran else None,
         })
         created_ids.append(wid)
 
@@ -827,6 +882,8 @@ async def _tool_list_bookings(args: dict, ctx: ToolContext) -> str:
         "departure_time": b["departure_time"],
         "direction": b["direction"],
         "direction_label": DIRECTION_LABELS.get(b["direction"], b["direction"]),
+        "pickup_stop": b.get("pickup_stop"),
+        "dropoff_stop": b.get("dropoff_stop"),
         "created_at": b["created_at"],
     } for b in bookings]}, ensure_ascii=False)
 
@@ -869,8 +926,29 @@ async def _tool_book_trip_now(args: dict, ctx: ToolContext) -> str:
     status, text, _ = await execute_booking(
         user_id=ctx.user_id, date=date_s, direction=direction,
         departure_time=dep, watch=None,
+        pickup_stop=args.get("pickup_stop"),
+        dropoff_stop=args.get("dropoff_stop"),
     )
     return json.dumps({"status": status, "message": text}, ensure_ascii=False)
+
+
+async def _tool_get_baranovichi_stops(args: dict, ctx: ToolContext) -> str:
+    date_s = args.get("date", "")
+    if not _valid_date(date_s):
+        return _err("date must be YYYY-MM-DD")
+    direction = args.get("direction")
+    if direction not in ("mnsk_baran", "baran_mnsk"):
+        return _err("direction must be mnsk_baran|baran_mnsk")
+    try:
+        stops = await BOOKER.get_stops(ctx.user_id, date_s, direction)
+    except InvalidCredentials:
+        return _err("аккаунт сайта не подключён — сначала save_baranovichi_credentials")
+    except Exception as e:
+        return _err(f"не удалось получить остановки: {type(e).__name__}")
+    if not stops["pickup"] and not stops["dropoff"]:
+        return _err("на эту дату нет рейсов с доступной бронью — "
+                    "остановки показать не с чего")
+    return json.dumps(stops, ensure_ascii=False)
 
 
 async def _tool_generate_sessions_report(args: dict, ctx: ToolContext) -> str:
@@ -908,6 +986,7 @@ _HANDLERS = {
     "list_bookings": _tool_list_bookings,
     "cancel_booking": _tool_cancel_booking,
     "book_trip_now": _tool_book_trip_now,
+    "get_baranovichi_stops": _tool_get_baranovichi_stops,
 }
 
 

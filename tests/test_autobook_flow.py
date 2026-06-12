@@ -24,11 +24,16 @@ class FakeBooker:
                                          trip_id="5147")
         self.book_error = None
         self.book_calls = []
+        self.stop_args = []
         self.cancel_calls = []
         self.cancel_ok = True
+        self.stops = {"pickup": ["ИНСТИТУТ КУЛЬТУРЫ", "ДРУГАЯ"],
+                      "dropoff": ["АВТОВОКЗАЛ"]}
 
-    async def book(self, user_id, date, direction, departure_time):
+    async def book(self, user_id, date, direction, departure_time,
+                   pickup_stop=None, dropoff_stop=None):
         self.book_calls.append((user_id, date, direction, departure_time))
+        self.stop_args.append((pickup_stop, dropoff_stop))
         await asyncio.sleep(0.01)  # окно для гонок — лок обязан их закрывать
         if self.book_error:
             raise self.book_error
@@ -37,6 +42,9 @@ class FakeBooker:
     async def cancel(self, user_id, ticket_id, trip_id):
         self.cancel_calls.append((user_id, ticket_id, trip_id))
         return self.cancel_ok
+
+    async def get_stops(self, user_id, date, direction):
+        return self.stops
 
 
 @pytest.fixture
@@ -65,12 +73,14 @@ def _trip(trip_id, departure_time, free_seats=3):
 async def _mk_watch_row(user_id=1, provider="baranovichi_express",
                         autobook="auto", goal_id="g1",
                         pref_from=None, pref_to=None,
-                        date="2099-06-14", time_from="10:00", time_to="20:00"):
+                        date="2099-06-14", time_from="10:00", time_to="20:00",
+                        pickup_stop=None, dropoff_stop=None):
     wid = await db_module.create_watch(
         user_id=user_id, provider=provider, direction="mnsk_baran",
         date=date, time_from=time_from, time_to=time_to, interval_sec=60,
         autobook=autobook, goal_id=goal_id,
         pref_time_from=pref_from, pref_time_to=pref_to,
+        pickup_stop=pickup_stop, dropoff_stop=dropoff_stop,
     )
     return await db_module.get_watch(wid)
 
@@ -191,6 +201,113 @@ async def test_auto_bad_creds_disables_autobook_and_notifies(tmp_db, baran_provi
                for m in bot.sent)
     # обычное уведомление тоже ушло
     assert any("Появились места" in m["text"] for m in bot.sent)
+
+
+@pytest.mark.asyncio
+async def test_auto_passes_watch_stops_to_booker(tmp_db, baran_provider, fake_booker):
+    bot = FakeBot()
+    scheduler.init_scheduler(bot)
+    watch = await _mk_watch_row(autobook="auto", goal_id="g14",
+                                pickup_stop="другая", dropoff_stop="полесье")
+    baran_provider.trips = [_trip("t1", "12:30")]
+    state = {"notified": set(), "consecutive_errors": 0}
+
+    with pytest.raises(scheduler.WatchStopped):
+        await scheduler._poll_once(watch, None, state)
+
+    assert fake_booker.stop_args == [("другая", "полесье")]
+
+
+@pytest.mark.asyncio
+async def test_auto_stop_not_found_disables_autobook(tmp_db, baran_provider, fake_booker):
+    bot = FakeBot()
+    scheduler.init_scheduler(bot)
+    fake_booker.book_result = BookingResult(
+        status="stop_not_found",
+        available_pickups=["ИНСТИТУТ КУЛЬТУРЫ", "ДРУГАЯ"],
+        available_dropoffs=["АВТОВОКЗАЛ"])
+    watch = await _mk_watch_row(autobook="auto", goal_id="g15",
+                                pickup_stop="космодром")
+    baran_provider.trips = [_trip("t1", "12:30")]
+    state = {"notified": set(), "consecutive_errors": 0}
+
+    await scheduler._poll_once(watch, None, state)
+
+    assert (await db_module.get_watch(watch["id"]))["autobook"] == "off"
+    alert = next(m for m in bot.sent if "Не нашёл остановку" in m["text"])
+    assert "ИНСТИТУТ КУЛЬТУРЫ" in alert["text"]
+    assert "вслепую" in alert["text"]
+    # деградация: обычное уведомление о местах тоже ушло
+    assert any("Появились места" in m["text"] for m in bot.sent)
+    assert await db_module.get_user_bookings(1) == []
+
+
+@pytest.mark.asyncio
+async def test_booked_message_names_stops(tmp_db, fake_booker):
+    fake_booker.book_result = BookingResult(
+        status="booked", ticket_id="9911", trip_id="5147",
+        pickup_label="ИНСТИТУТ КУЛЬТУРЫ", dropoff_label="АВТОВОКЗАЛ")
+    watch = await _mk_watch_row(autobook="auto", goal_id="g16")
+
+    status, text, _ = await booking_flow.execute_booking(
+        user_id=1, date="2099-06-14", direction="mnsk_baran",
+        departure_time="12:30", watch=watch)
+
+    assert status == "booked"
+    assert "ИНСТИТУТ КУЛЬТУРЫ" in text
+    assert "АВТОВОКЗАЛ" in text
+    booking = (await db_module.get_user_bookings(1))[0]
+    assert booking["pickup_stop"] == "ИНСТИТУТ КУЛЬТУРЫ"
+    assert booking["dropoff_stop"] == "АВТОВОКЗАЛ"
+
+
+@pytest.mark.asyncio
+async def test_create_watch_stores_stops_and_validates(tmp_db, fake_scheduler):
+    await db_module.save_site_credentials(1, "+375 (29) 177-62-96", "pw")
+    ctx = ToolContext(user_id=1)
+    base = {
+        "direction": "mnsk_baran", "date": "2099-06-14",
+        "time_from": "10:00", "time_to": "20:00", "interval_sec": 60,
+    }
+    # остановки без барановичей — ошибка
+    out = json.loads(await dispatch_tool("create_watch", {
+        **base, "providers": ["atlasbus"], "pickup_stop": "другая"}, ctx))
+    assert "error" in out
+
+    out = json.loads(await dispatch_tool("create_watch", {
+        **base, "providers": ["baranovichi_express", "atlasbus"],
+        "autobook": "confirm",
+        "pickup_stop": "ДРУГАЯ", "dropoff_stop": "АВТОВОКЗАЛ"}, ctx))
+    w_baran = await db_module.get_watch(out["created_ids"][0])
+    w_atlas = await db_module.get_watch(out["created_ids"][1])
+    assert w_baran["pickup_stop"] == "ДРУГАЯ"
+    assert w_baran["dropoff_stop"] == "АВТОВОКЗАЛ"
+    assert w_atlas["pickup_stop"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_baranovichi_stops_tool(tmp_db, fake_booker):
+    ctx = ToolContext(user_id=1)
+    out = json.loads(await dispatch_tool("get_baranovichi_stops", {
+        "date": "2099-06-14", "direction": "mnsk_baran"}, ctx))
+    assert out["pickup"] == ["ИНСТИТУТ КУЛЬТУРЫ", "ДРУГАЯ"]
+    assert out["dropoff"] == ["АВТОВОКЗАЛ"]
+
+    fake_booker.stops = {"pickup": [], "dropoff": []}
+    out = json.loads(await dispatch_tool("get_baranovichi_stops", {
+        "date": "2099-06-14", "direction": "mnsk_baran"}, ctx))
+    assert "error" in out
+
+
+@pytest.mark.asyncio
+async def test_list_bookings_includes_stops(tmp_db):
+    await db_module.create_booking(
+        user_id=1, date="2099-06-14", direction="mnsk_baran",
+        departure_time="12:30", pickup_stop="ДРУГАЯ", dropoff_stop="АВТОВОКЗАЛ")
+    ctx = ToolContext(user_id=1)
+    out = json.loads(await dispatch_tool("list_bookings", {}, ctx))
+    assert out["bookings"][0]["pickup_stop"] == "ДРУГАЯ"
+    assert out["bookings"][0]["dropoff_stop"] == "АВТОВОКЗАЛ"
 
 
 @pytest.mark.asyncio

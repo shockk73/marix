@@ -3,7 +3,7 @@ from datetime import datetime
 from providers import PROVIDERS
 from providers.base import DIRECTION_LABELS
 
-LLM_SESSION_VERSION = "2026-06-12-autobook-v2"
+LLM_SESSION_VERSION = "2026-06-12-autobook-v3"
 
 
 def build_system_prompt(
@@ -49,6 +49,9 @@ def build_system_prompt(
                                   f"{w['pref_time_from']}–{w['pref_time_to']}")
                 if w.get("goal_id"):
                     extra += f"; цель {w['goal_id']}"
+                if w.get("pickup_stop") or w.get("dropoff_stop"):
+                    extra += (f"; остановки: {w.get('pickup_stop') or 'главная'}"
+                              f" → {w.get('dropoff_stop') or 'главная'}")
                 parts.append(
                     f"  - #{w['id']} {w['provider']} {w['direction']} {w['date']} "
                     f"{w['time_from']}–{w['time_to']} каждые {w['interval_sec']}с; "
@@ -72,9 +75,13 @@ def build_system_prompt(
             parts.append("Активные брони пользователя:")
             for b in bookings:
                 goal = f"; цель {b['goal_id']}" if b.get("goal_id") else ""
+                stops = ""
+                if b.get("pickup_stop") or b.get("dropoff_stop"):
+                    stops = (f"; {b.get('pickup_stop') or '—'} → "
+                             f"{b.get('dropoff_stop') or '—'}")
                 parts.append(
                     f"  - #{b['id']} {b['date']} {b['departure_time']} "
-                    f"{b['direction']}{goal}"
+                    f"{b['direction']}{goal}{stops}"
                 )
     parts += [
         "",
@@ -146,6 +153,14 @@ def build_system_prompt(
         "подключённого аккаунта — попроси телефон и пароль от tickets.baranovichi-express.by "
         "и вызови save_baranovichi_credentials. Если пользователь создал слежку на "
         "baranovichi_express без автоброни и аккаунт не подключён — один раз предложи.",
+        "16a. ОСТАНОВКИ: у брони есть остановка посадки и высадки. Включая автобронь, "
+        "уточни их у пользователя (удобно в общей форме ask_user_form; список остановок — "
+        "get_baranovichi_stops, можно показать экраном). Если пользователю всё равно — "
+        "не передавай pickup_stop/dropoff_stop: сайт возьмёт главную остановку "
+        "(обычно ИНСТИТУТ КУЛЬТУРЫ ↔ АВТОВОКЗАЛ), и бот назовёт её в подтверждении "
+        "брони. Если указанная остановка не найдётся на сайте, система НЕ бронирует "
+        "вслепую: пришлёт доступные варианты и выключит автобронь — помоги пользователю "
+        "выбрать правильную и включи заново.",
         "17. Приоритетное окно: если пользователь называет и широкий диапазон, и "
         "предпочтительный («с 12 до 16, лучше 14–15») — передай pref_time_from/pref_time_to "
         "в create_watch. Механика, которую ты должен уметь объяснить: система бронирует "

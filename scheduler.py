@@ -285,12 +285,14 @@ async def _handle_autobook(watch: dict, newly: list[Trip]) -> bool:
             return True
         if status == "gone":
             return True  # место уже ушло — не дёргаем юзера
-        if status == "creds":
+        if status in ("creds", "stop_not_found"):
+            # автобронь уже выключена внутри execute_booking; алертим и
+            # деградируем в обычное уведомление о местах (return False)
             try:
                 await send_with_retry(_bot, user_id, text)
             except Exception as e:
-                logger.warning("Creds alert failed: %s", e)
-            return False  # дальше обычное уведомление
+                logger.warning("Autobook alert failed: %s", e)
+            return False
         return False  # error: залогировано, уйдёт обычное уведомление
 
     # mode == "confirm": обычное уведомление + кнопки брони

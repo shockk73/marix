@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS bookings (
     status      TEXT NOT NULL DEFAULT 'active',
     watch_id    INTEGER,
     goal_id     TEXT,
+    pickup_stop  TEXT,
+    dropoff_stop TEXT,
     created_at  TEXT NOT NULL,
     canceled_at TEXT
 )
@@ -186,6 +188,10 @@ async def init_db():
         await _ensure_column(conn, "watches", "goal_id TEXT")
         await _ensure_column(conn, "watches", "pref_time_from TEXT")
         await _ensure_column(conn, "watches", "pref_time_to TEXT")
+        await _ensure_column(conn, "watches", "pickup_stop TEXT")
+        await _ensure_column(conn, "watches", "dropoff_stop TEXT")
+        await _ensure_column(conn, "bookings", "pickup_stop TEXT")
+        await _ensure_column(conn, "bookings", "dropoff_stop TEXT")
         await conn.commit()
 
 
@@ -336,15 +342,18 @@ async def create_booking(
     trip_id: str | None = None,
     watch_id: int | None = None,
     goal_id: str | None = None,
+    pickup_stop: str | None = None,
+    dropoff_stop: str | None = None,
 ) -> int:
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
             """INSERT INTO bookings
                (user_id, ticket_id, trip_id, date, direction, departure_time,
-                status, watch_id, goal_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+                status, watch_id, goal_id, pickup_stop, dropoff_stop, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
             (user_id, ticket_id, trip_id, date, direction, departure_time,
-             watch_id, goal_id, datetime.now().isoformat()),
+             watch_id, goal_id, pickup_stop, dropoff_stop,
+             datetime.now().isoformat()),
         )
         await conn.commit()
         return cur.lastrowid
@@ -437,17 +446,19 @@ async def create_watch(
     goal_id: str | None = None,
     pref_time_from: str | None = None,
     pref_time_to: str | None = None,
+    pickup_stop: str | None = None,
+    dropoff_stop: str | None = None,
 ) -> int:
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
             """INSERT INTO watches
                (user_id, provider, direction, date, time_from, time_to,
                 interval_sec, autobook, goal_id, pref_time_from, pref_time_to,
-                created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                pickup_stop, dropoff_stop, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, provider, direction, date, time_from, time_to,
              interval_sec, autobook, goal_id, pref_time_from, pref_time_to,
-             datetime.now().isoformat()),
+             pickup_stop, dropoff_stop, datetime.now().isoformat()),
         )
         await conn.commit()
         return cur.lastrowid

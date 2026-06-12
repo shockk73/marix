@@ -42,7 +42,7 @@ def test_tool_schemas_contains_all_expected_names():
         "schedule_self_callback", "list_self_callbacks",
         "save_baranovichi_credentials", "get_credentials_status",
         "delete_credentials", "list_bookings", "cancel_booking",
-        "book_trip_now",
+        "book_trip_now", "get_baranovichi_stops",
     }
 
 

@@ -168,6 +168,9 @@ def test_prompt_explains_goals_form_and_terminology():
     assert "ask_user_form" in prompt             # форма из нескольких вопросов
     assert "Перебронировать" in prompt           # полуручное перебронирование
     assert "не должен её знать" in prompt        # терминология скрыта от юзера
+    assert "ОСТАНОВКИ" in prompt                 # посадка/высадка для брони
+    assert "get_baranovichi_stops" in prompt
+    assert "вслепую" in prompt
 
 
 def _form_tool_call(questions, call_id="f1"):

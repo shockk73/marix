@@ -49,9 +49,13 @@ class SessionExpired(Exception):
 
 @dataclass
 class BookingResult:
-    status: str  # "booked" | "gone"
+    status: str  # "booked" | "gone" | "stop_not_found"
     ticket_id: str | None = None
     trip_id: str | None = None
+    pickup_label: str | None = None
+    dropoff_label: str | None = None
+    available_pickups: list[str] | None = None
+    available_dropoffs: list[str] | None = None
 
 
 def normalize_phone(raw: str) -> str:
@@ -92,15 +96,39 @@ def _form_inputs(form_body: str) -> dict[str, str]:
     return out
 
 
-def _first_select_option(form_body: str, name: str) -> str | None:
+def _select_options(form_body: str, name: str) -> list[tuple[str, str]]:
+    """Все опции селекта: [(value, человекочитаемый label), ...]."""
     m = re.search(
         rf'<select[^>]*name="{name}"[^>]*>(.*?)</select>',
         form_body, re.S | re.I,
     )
     if not m:
+        return []
+    out = []
+    for value, label in re.findall(
+            r'<option[^>]*value="([^"]*)"[^>]*>(.*?)</option>',
+            m.group(1), re.S):
+        clean = html_mod.unescape(re.sub(r"<[^>]+>", "", label)).strip()
+        out.append((html_mod.unescape(value), clean))
+    return out
+
+
+def _pick_stop(
+    options: list[tuple[str, str]],
+    preferred: str | None,
+) -> tuple[str, str] | None:
+    """Выбор остановки: без предпочтения — первая (главная) остановка сайта;
+    с предпочтением — поиск подстроки в названии без учёта регистра,
+    не нашлась — None (бронировать вслепую нельзя)."""
+    if not options:
         return None
-    opt = re.search(r'<option[^>]*value="([^"]*)"', m.group(1))
-    return html_mod.unescape(opt.group(1)) if opt else None
+    if not preferred:
+        return options[0]
+    needle = preferred.strip().lower()
+    for value, label in options:
+        if needle in label.lower():
+            return (value, label)
+    return None
 
 
 def _abs_url(href: str) -> str:
@@ -125,14 +153,14 @@ async def login(client: httpx.AsyncClient, phone: str, password: str) -> None:
     raise InvalidCredentials("login failed")
 
 
-async def book_trip(
+async def _find_confirm_href(
     client: httpx.AsyncClient,
     date: str,
     direction: str,
-    departure_time: str,
-) -> BookingResult:
-    """Поиск под логином → матч рейса по времени → confirm → store → проверка
-    появления билета. Сессию не восстанавливает — это делает Booker."""
+    departure_time: str | None,
+) -> str | None:
+    """Поиск под логином, возврат confirm-ссылки рейса. departure_time=None —
+    первый рейс с доступной бронью. Анонимная страница → SessionExpired."""
     pickup, destination = _DIRECTIONS[direction]
     resp = await client.get(f"{BASE}/tickets/search", params={
         "pickup": pickup,
@@ -144,19 +172,35 @@ async def book_trip(
     if "Выйти" not in page:
         raise SessionExpired("search page is anonymous")
 
-    target = _norm_time(departure_time)
-    confirm_href = None
+    target = _norm_time(departure_time) if departure_time else None
     for chunk in page.split("<article")[1:]:
         head, _, body = chunk.partition(">")
         if "tickets-item" not in head:
             continue
         tm = _TIME_RE.search(body)
-        if not tm or _norm_time(tm.group(1)) != target:
+        if target is not None and (not tm or _norm_time(tm.group(1)) != target):
             continue
         hm = _CONFIRM_HREF_RE.search(body)
         if hm:
-            confirm_href = html_mod.unescape(hm.group(1))
-        break
+            return html_mod.unescape(hm.group(1))
+        if target is not None:
+            return None  # карточка нашлась, но «Купить» нет — мест нет
+    return None
+
+
+async def book_trip(
+    client: httpx.AsyncClient,
+    date: str,
+    direction: str,
+    departure_time: str,
+    pickup_stop: str | None = None,
+    dropoff_stop: str | None = None,
+) -> BookingResult:
+    """Поиск под логином → матч рейса по времени → confirm → выбор остановок
+    → store → проверка появления билета. Остановки: без предпочтения — первая
+    (главная) на сайте; с предпочтением — матч по названию, не нашлась —
+    stop_not_found (вслепую не бронируем). Сессию восстанавливает Booker."""
+    confirm_href = await _find_confirm_href(client, date, direction, departure_time)
     if not confirm_href:
         return BookingResult(status="gone")
 
@@ -175,10 +219,22 @@ async def book_trip(
     action = html_mod.unescape(form_m.group(1))
     form_body = form_m.group(2)
     fields = _form_inputs(form_body)
-    for select_name in ("pickup", "destination"):
-        v = _first_select_option(form_body, select_name)
-        if v is not None:
-            fields[select_name] = v
+
+    pickup_opts = _select_options(form_body, "pickup")
+    dropoff_opts = _select_options(form_body, "destination")
+    chosen_pickup = _pick_stop(pickup_opts, pickup_stop)
+    chosen_dropoff = _pick_stop(dropoff_opts, dropoff_stop)
+    if ((pickup_opts and chosen_pickup is None)
+            or (dropoff_opts and chosen_dropoff is None)):
+        return BookingResult(
+            status="stop_not_found", trip_id=trip_id,
+            available_pickups=[label for _, label in pickup_opts],
+            available_dropoffs=[label for _, label in dropoff_opts],
+        )
+    if chosen_pickup:
+        fields["pickup"] = chosen_pickup[0]
+    if chosen_dropoff:
+        fields["destination"] = chosen_dropoff[0]
     fields.setdefault("comment", "")
 
     await client.post(_abs_url(action), data=fields)
@@ -190,8 +246,34 @@ async def book_trip(
     )
     if not cancel_m:
         return BookingResult(status="gone", trip_id=trip_id)
-    return BookingResult(status="booked", ticket_id=cancel_m.group(1),
-                         trip_id=trip_id)
+    return BookingResult(
+        status="booked", ticket_id=cancel_m.group(1), trip_id=trip_id,
+        pickup_label=chosen_pickup[1] if chosen_pickup else None,
+        dropoff_label=chosen_dropoff[1] if chosen_dropoff else None,
+    )
+
+
+async def list_stops(
+    client: httpx.AsyncClient,
+    date: str,
+    direction: str,
+) -> dict[str, list[str]]:
+    """Списки остановок посадки/высадки с confirm-страницы первого
+    доступного рейса. Пустые списки — нет рейсов с бронью на дату."""
+    confirm_href = await _find_confirm_href(client, date, direction, None)
+    if not confirm_href:
+        return {"pickup": [], "dropoff": []}
+    resp = await client.get(_abs_url(confirm_href))
+    if resp.status_code in (301, 302, 303):
+        raise SessionExpired("confirm redirected to login")
+    form_m = _STORE_FORM_RE.search(resp.text)
+    if not form_m:
+        return {"pickup": [], "dropoff": []}
+    form_body = form_m.group(2)
+    return {
+        "pickup": [label for _, label in _select_options(form_body, "pickup")],
+        "dropoff": [label for _, label in _select_options(form_body, "destination")],
+    }
 
 
 async def cancel_ticket(
@@ -244,13 +326,30 @@ class BaranovichiBooker:
         date: str,
         direction: str,
         departure_time: str,
+        pickup_stop: str | None = None,
+        dropoff_stop: str | None = None,
     ) -> BookingResult:
         client = await self._logged_client(user_id)
         try:
-            return await book_trip(client, date, direction, departure_time)
+            return await book_trip(client, date, direction, departure_time,
+                                   pickup_stop, dropoff_stop)
         except SessionExpired:
             client = await self._logged_client(user_id, force=True)
-            return await book_trip(client, date, direction, departure_time)
+            return await book_trip(client, date, direction, departure_time,
+                                   pickup_stop, dropoff_stop)
+
+    async def get_stops(
+        self,
+        user_id: int,
+        date: str,
+        direction: str,
+    ) -> dict[str, list[str]]:
+        client = await self._logged_client(user_id)
+        try:
+            return await list_stops(client, date, direction)
+        except SessionExpired:
+            client = await self._logged_client(user_id, force=True)
+            return await list_stops(client, date, direction)
 
     async def cancel(self, user_id: int, ticket_id: str, trip_id: str | None) -> bool:
         client = await self._logged_client(user_id)

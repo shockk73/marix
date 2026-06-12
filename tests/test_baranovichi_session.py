@@ -12,6 +12,7 @@ from providers.baranovichi_session import (
     InvalidCredentials,
     book_trip,
     cancel_ticket,
+    list_stops,
     login,
     normalize_phone,
 )
@@ -162,9 +163,73 @@ async def test_book_trip_success():
     assert confirm_route.called
     body = store_route.calls[0].request.content.decode()
     assert "tok456" in body
-    assert "pickup=11" in body          # первая остановка из селекта
+    assert "pickup=11" in body          # первая (главная) остановка из селекта
     assert "destination=21" in body
     assert "payment=cash" in body
+    assert result.pickup_label == "ИНСТИТУТ КУЛЬТУРЫ"
+    assert result.dropoff_label == "АВТОВОКЗАЛ"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_book_trip_with_named_stops():
+    respx.get(f"{BASE}/tickets/search").mock(
+        return_value=httpx.Response(200, text=SEARCH_LOGGED))
+    respx.get(url__startswith=f"{BASE}/tickets/5147/").mock(
+        return_value=httpx.Response(200, text=CONFIRM_PAGE))
+    store_route = respx.post(url__startswith=f"{BASE}/tickets/store").mock(
+        return_value=httpx.Response(302, headers={
+            "location": f"{BASE}/user/tickets/active"}))
+    respx.get(f"{BASE}/user/tickets/active").mock(
+        return_value=httpx.Response(200, text=ACTIVE_WITH_TICKET))
+
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        result = await book_trip(client, "2026-06-14", "mnsk_baran", "07:00",
+                                 pickup_stop="другая",
+                                 dropoff_stop="автовокзал")
+
+    assert result.status == "booked"
+    assert result.pickup_label == "ДРУГАЯ"      # матч по подстроке без регистра
+    assert result.dropoff_label == "АВТОВОКЗАЛ"
+    body = store_route.calls[0].request.content.decode()
+    assert "pickup=12" in body
+    assert "destination=21" in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_book_trip_unknown_stop_refuses_to_book():
+    respx.get(f"{BASE}/tickets/search").mock(
+        return_value=httpx.Response(200, text=SEARCH_LOGGED))
+    respx.get(url__startswith=f"{BASE}/tickets/5147/").mock(
+        return_value=httpx.Response(200, text=CONFIRM_PAGE))
+    store_route = respx.post(url__startswith=f"{BASE}/tickets/store").mock(
+        return_value=httpx.Response(302))
+
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        result = await book_trip(client, "2026-06-14", "mnsk_baran", "07:00",
+                                 pickup_stop="космодром")
+
+    assert result.status == "stop_not_found"
+    assert "ИНСТИТУТ КУЛЬТУРЫ" in result.available_pickups
+    assert "ДРУГАЯ" in result.available_pickups
+    assert result.available_dropoffs == ["АВТОВОКЗАЛ"]
+    assert not store_route.called               # вслепую не бронируем
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_stops_returns_labels():
+    respx.get(f"{BASE}/tickets/search").mock(
+        return_value=httpx.Response(200, text=SEARCH_LOGGED))
+    respx.get(url__startswith=f"{BASE}/tickets/5147/").mock(
+        return_value=httpx.Response(200, text=CONFIRM_PAGE))
+
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        stops = await list_stops(client, "2026-06-14", "mnsk_baran")
+
+    assert stops["pickup"] == ["ИНСТИТУТ КУЛЬТУРЫ", "ДРУГАЯ"]
+    assert stops["dropoff"] == ["АВТОВОКЗАЛ"]
 
 
 @pytest.mark.asyncio

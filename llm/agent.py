@@ -51,6 +51,7 @@ _TOOL_THINKING_LABELS = {
     "list_bookings": "Смотрю брони…",
     "cancel_booking": "Отменяю бронь…",
     "book_trip_now": "Бронирую…",
+    "get_baranovichi_stops": "Смотрю остановки…",
 }
 
 # State-changing инструменты: выполняются только после явного «Да» юзера.
@@ -359,6 +360,8 @@ class LLMAgent:
                 "goal_id": w.get("goal_id"),
                 "pref_time_from": w.get("pref_time_from"),
                 "pref_time_to": w.get("pref_time_to"),
+                "pickup_stop": w.get("pickup_stop"),
+                "dropoff_stop": w.get("dropoff_stop"),
                 "execution": statuses.get(w["id"]) or {},
             } for w in watches],
             "callbacks": [{
@@ -376,6 +379,8 @@ class LLMAgent:
                 "departure_time": b["departure_time"],
                 "direction": b["direction"],
                 "goal_id": b["goal_id"],
+                "pickup_stop": b.get("pickup_stop"),
+                "dropoff_stop": b.get("dropoff_stop"),
             } for b in bookings],
         }
 
