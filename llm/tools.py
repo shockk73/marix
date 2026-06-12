@@ -972,13 +972,18 @@ async def _tool_check_trips_now(args: dict, ctx: ToolContext) -> str:
     if not bookable:
         note = ("Этот перевозчик НЕ поддерживает бронь — не предлагай "
                 "забронировать его рейсы, только уведомления/слежку.")
-    elif available:
+    elif not available:
+        note = ("Мест нет: предложи слежку кнопками show_screen "
+                "(«🔔 Следить» / «Не надо»), не текстовым вопросом.")
+    elif await db_module.get_site_credentials(ctx.user_id) is not None:
         note = ("Рейсы бронируемые: предлагай выбор ЭКРАНОМ show_screen — "
                 "кнопки с временами (value: «забронируй HH:MM»), не текстовым "
                 "вопросом.")
     else:
-        note = ("Мест нет: предложи слежку кнопками show_screen "
-                "(«🔔 Следить» / «Не надо»), не текстовым вопросом.")
+        note = ("Рейсы бронируемые, но аккаунт пользователя НЕ подключён: "
+                "покажи экран show_screen с кнопками «🔑 Подключить "
+                "автобронь» / «🔔 Следить за местами» / «Не надо». Никаких "
+                "мета-комментариев про кнопки — просто построй экран.")
     return json.dumps({
         "provider": provider_key,
         "provider_display": provider.display_name,

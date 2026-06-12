@@ -494,17 +494,18 @@ class LLMAgent:
                 )
                 msg = _salvage_inline_tool_call(msg)
                 if (not (msg.get("tool_calls") or [])
-                        and (msg.get("content") or "").rstrip().endswith("?")):
-                    # Текстовый вопрос без кнопок запрещён — один принудительный
-                    # шанс переделать его в show_screen/ask_user.
+                        and "?" in (msg.get("content") or "")):
+                    # Текстовый вопрос без кнопок запрещён (в любом месте
+                    # сообщения) — один принудительный шанс переделать.
                     retry_messages = messages + [
                         {"role": "assistant", "content": msg.get("content") or ""},
                         {"role": "system", "content": (
-                            "Твоё последнее сообщение заканчивается текстовым "
-                            "вопросом без кнопок — это запрещено. Задай тот же "
-                            "вопрос инструментом show_screen или ask_user с "
-                            "вариантами-кнопками (ask_user_form, если вопросов "
-                            "несколько). Риторический вопрос просто убери.")},
+                            "В твоём сообщении текстовый вопрос/предложение "
+                            "действий без кнопок — это запрещено. Перепиши: "
+                            "краткий факт текстом, а вопрос и варианты действий "
+                            "— инструментом show_screen или ask_user с "
+                            "кнопками. Никаких мета-комментариев про кнопки и "
+                            "свои возможности. Риторический вопрос убери.")},
                     ]
                     msg = await self._client.chat_completion(
                         messages=retry_messages, tools=build_tools_for_role(role),
